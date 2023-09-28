@@ -64,6 +64,8 @@ import { CoreNetwork } from '@services/network';
 import { CoreUserGuestSupportConfig } from '@features/user/classes/support/guest-support-config';
 import { CoreLang, CoreLangFormat } from '@services/lang';
 import { CoreNative } from '@features/native/services/native';
+import { CoreContentLinksHelper } from '@features/contentlinks/services/contentlinks-helper';
+import { CoreAutoLogoutType, CoreAutoLogout } from '@features/autologout/services/autologout';
 
 export const CORE_SITE_SCHEMAS = new InjectionToken<CoreSiteSchema[]>('CORE_SITE_SCHEMAS');
 export const CORE_SITE_CURRENT_SITE_ID_CONFIG = 'current_site_id';
@@ -708,6 +710,39 @@ export class CoreSitesProvider {
     }
 
     /**
+     * Visit a site link.
+     *
+     * @param url URL to handle.
+     * @param options Behaviour options.
+     * @param options.siteId Site Id.
+     * @param options.username Username related with the URL. E.g. in 'http://myuser@m.com', url would be 'http://m.com' and
+     *                 the username 'myuser'. Don't use it if you don't want to filter by username.
+     * @param options.checkRoot Whether to check if the URL is the root URL of a site.
+     * @param options.openBrowserRoot Whether to open in browser if it's root URL and it belongs to current site.
+     */
+    async visitLink(
+        url: string,
+        options: {
+            siteId?: string;
+            username?: string;
+            checkRoot?: boolean;
+            openBrowserRoot?: boolean;
+        } = {},
+    ): Promise<void> {
+        const treated = await CoreContentLinksHelper.handleLink(url, options.username, options.checkRoot, options.openBrowserRoot);
+
+        if (treated) {
+            return;
+        }
+
+        const site = options.siteId
+            ? await CoreSites.getSite(options.siteId)
+            : CoreSites.getCurrentSite();
+
+        await site?.openInBrowserWithAutoLogin(url);
+    }
+
+    /**
      * Check for the minimum required version.
      *
      * @param info Site info.
@@ -1071,7 +1106,7 @@ export class CoreSitesProvider {
         // Site deleted from sites list, now delete the folder.
         await site.deleteFolder();
 
-        await CoreUtils.ignoreErrors(CoreNative.plugin('secureStorage').deleteCollection(siteId));
+        await CoreUtils.ignoreErrors(CoreNative.plugin('secureStorage')?.deleteCollection(siteId));
 
         CoreEvents.trigger(CoreEvents.SITE_DELETED, site, siteId);
     }
@@ -1427,6 +1462,8 @@ export class CoreSitesProvider {
      * @returns Promise resolved if a session is restored.
      */
     async restoreSession(): Promise<void> {
+        await this.handleAutoLogout();
+
         if (this.sessionRestored) {
             return Promise.reject(new CoreError('Session already restored.'));
         }
@@ -1441,6 +1478,30 @@ export class CoreSitesProvider {
         } catch {
             // No current session.
         }
+    }
+
+    /**
+     * Handle auto logout by checking autologout type and time if its required.
+     */
+    async handleAutoLogout(): Promise<void> {
+        await CoreUtils.ignoreErrors(( async () => {
+            const siteId = await this.getStoredCurrentSiteId();
+            const site = await this.getSite(siteId);
+            const autoLogoutType = Number(site.getStoredConfig('tool_mobile_autologout'));
+            const autoLogoutTime = Number(site.getStoredConfig('tool_mobile_autologouttime'));
+
+            if (autoLogoutType === CoreAutoLogoutType.NEVER || !site.id) {
+                return;
+            }
+
+            if (autoLogoutType === CoreAutoLogoutType.CUSTOM) {
+                await CoreAutoLogout.handleSessionClosed(autoLogoutTime, site);
+
+                return;
+            }
+
+            await CoreAutoLogout.handleAppClosed(site);
+        })());
     }
 
     /**
@@ -2002,7 +2063,7 @@ export class CoreSitesProvider {
      * @returns Stored tokens.
      */
     protected async getTokensFromSecureStorage(siteId: string): Promise<{ token: string; privateToken?: string }> {
-        const result = await CoreNative.plugin('secureStorage').get(['token', 'privateToken'], siteId);
+        const result = await CoreNative.plugin('secureStorage')?.get(['token', 'privateToken'], siteId);
 
         return {
             token: result?.token ?? '',
@@ -2022,7 +2083,7 @@ export class CoreSitesProvider {
         token: string,
         privateToken?: string,
     ): Promise<void> {
-        await CoreNative.plugin('secureStorage').store({
+        await CoreNative.plugin('secureStorage')?.store({
             token: token,
             privateToken: privateToken ?? '',
         }, siteId);

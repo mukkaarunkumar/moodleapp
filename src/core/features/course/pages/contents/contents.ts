@@ -58,6 +58,7 @@ export class CoreCourseContentsPage implements OnInit, OnDestroy, CoreRefreshCon
     sections?: CoreCourseSection[];
     sectionId?: number;
     sectionNumber?: number;
+    blockInstanceId?: number;
     dataLoaded = false;
     updatingData = false;
     downloadCourseEnabled = false;
@@ -92,6 +93,7 @@ export class CoreCourseContentsPage implements OnInit, OnDestroy, CoreRefreshCon
 
         this.sectionId = CoreNavigator.getRouteNumberParam('sectionId');
         this.sectionNumber = CoreNavigator.getRouteNumberParam('sectionNumber');
+        this.blockInstanceId = CoreNavigator.getRouteNumberParam('blockInstanceId');
         this.moduleId = CoreNavigator.getRouteNumberParam('moduleId');
         this.isGuest = CoreNavigator.getRouteBooleanParam('isGuest');
 
@@ -355,6 +357,10 @@ export class CoreCourseContentsPage implements OnInit, OnDestroy, CoreRefreshCon
      * @returns Promise resolved when done.
      */
     protected async showLoadingAndRefresh(sync = false, invalidateData = true): Promise<void> {
+        // Try to keep current scroll position.
+        const scrollElement = await CoreUtils.ignoreErrors(this.content?.getScrollElement());
+        const scrollTop = scrollElement?.scrollTop ?? -1;
+
         this.updatingData = true;
         this.changeDetectorRef.detectChanges();
 
@@ -369,6 +375,11 @@ export class CoreCourseContentsPage implements OnInit, OnDestroy, CoreRefreshCon
         } finally {
             this.updatingData = false;
             this.changeDetectorRef.detectChanges();
+
+            if (scrollTop > 0) {
+                await CoreUtils.nextTick();
+                this.content?.scrollToPoint(0, scrollTop, 0);
+            }
         }
     }
 
