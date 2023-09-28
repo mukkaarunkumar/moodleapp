@@ -1,7 +1,7 @@
 pipeline {
    agent any
       environment {
-         PATH='/usr/local/bin:/usr/bin:/bin'
+         PATH='/home/arun/.nvm/versions/node/v14.21.3/bin:/sbin:/usr/sbin:/bin:/usr/bin'
       }
    stages {
       stage('NPM Setup') {
