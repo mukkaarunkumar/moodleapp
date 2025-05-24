@@ -18,12 +18,13 @@ import { Subscription } from 'rxjs';
 import { CoreSplitViewComponent } from '@components/split-view/split-view';
 import { CoreNavigator } from '@services/navigator';
 import { CoreScreen } from '@services/screen';
-import { CoreUtils } from '@services/utils/utils';
+import { CoreUtils } from '@singletons/utils';
 
 import { CoreRoutedItemsManagerSource } from './routed-items-manager-source';
 import { CoreRoutedItemsManager } from './routed-items-manager';
 import { CoreDom } from '@singletons/dom';
 import { CoreTime } from '@singletons/time';
+import { CorePromiseUtils } from '@singletons/promise-utils';
 
 /**
  * Helper class to manage the state and routing of a list of items in a page.
@@ -45,7 +46,7 @@ export class CoreListItemsManager<
 
         this.pageRouteLocator = pageRouteLocator;
         this.addListener({ onSelectedItemUpdated: debouncedScrollToCurrentElement });
-        this.finishSuccessfulFetch = CoreTime.once(() => CoreUtils.ignoreErrors(this.logActivity()));
+        this.finishSuccessfulFetch = CoreTime.once(() => CorePromiseUtils.ignoreErrors(this.logActivity()));
     }
 
     get items(): Item[] {
@@ -239,13 +240,13 @@ export class CoreListItemsManager<
     /**
      * @inheritdoc
      */
-    protected getSelectedItemPathFromRoute(route: ActivatedRouteSnapshot): string | null {
+    protected getSelectedItemPathFromRoute(route: ActivatedRouteSnapshot | ActivatedRoute): string | null {
         const segments: UrlSegment[] = [];
 
         while (route.firstChild) {
             route = route.firstChild;
 
-            segments.push(...route.url);
+            segments.push(...CoreNavigator.getRouteUrl(route));
         }
 
         return segments.map(segment => segment.path).join('/').replace(/\/+/, '/').trim() || null;
@@ -274,7 +275,7 @@ export class CoreListItemsManager<
      */
     private buildRouteMatcher(): (route: ActivatedRouteSnapshot) => boolean {
         if (this.pageRouteLocator instanceof ActivatedRoute) {
-            const pageRoutePath = CoreNavigator.getRouteFullPath(this.pageRouteLocator.snapshot);
+            const pageRoutePath = CoreNavigator.getRouteFullPath(this.pageRouteLocator);
 
             return route => CoreNavigator.getRouteFullPath(route) === pageRoutePath;
         }

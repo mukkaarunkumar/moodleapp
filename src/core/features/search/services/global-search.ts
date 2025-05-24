@@ -19,7 +19,8 @@ import { CoreWSExternalWarning } from '@services/ws';
 import { CoreCourseListItem, CoreCourses } from '@features/courses/services/courses';
 import { CoreUserWithAvatar } from '@components/user-avatar/user-avatar';
 import { CoreUser } from '@features/user/services/user';
-import { CoreSite } from '@classes/site';
+import { CoreCacheUpdateFrequency } from '@/core/constants';
+import { CoreTextFormat } from '@singletons/text';
 
 declare module '@singletons/events' {
 
@@ -101,7 +102,7 @@ export class CoreSearchGlobalSearchService {
             ? await CoreSites.getSite(siteId)
             : CoreSites.getRequiredCurrentSite();
 
-        return !site?.isFeatureDisabled('CoreNoDelegate_GlobalSearch')
+        return !site?.isFeatureDisabled('NoDelegate_GlobalSearch')
             && site?.wsAvailable('core_search_get_results') // @since 4.3
             && site?.canUseAdvancedFeature('enableglobalsearch');
     }
@@ -145,30 +146,6 @@ export class CoreSearchGlobalSearchService {
     }
 
     /**
-     * Get top results.
-     *
-     * @param query Search query.
-     * @param filters Search filters.
-     * @returns Top search results.
-     */
-    async getTopResults(query: string, filters: CoreSearchGlobalSearchFilters): Promise<CoreSearchGlobalSearchResult[]> {
-        if (this.filtersYieldEmptyResults(filters)) {
-            return [];
-        }
-
-        const site = CoreSites.getRequiredCurrentSite();
-        const params: CoreSearchGetTopResultsWSParams = {
-            query,
-            filters: await this.prepareAdvancedWSFilters(filters),
-        };
-        const preSets = CoreSites.getReadingStrategyPreSets(CoreSitesReadingStrategy.PREFER_NETWORK);
-
-        const { results } = await site.read<CoreSearchGetTopResultsWSResponse>('core_search_get_top_results', params, preSets);
-
-        return await Promise.all((results ?? []).map(result => this.formatWSResult(result)));
-    }
-
-    /**
      * Get available search areas.
      *
      * @returns Search areas.
@@ -178,7 +155,7 @@ export class CoreSearchGlobalSearchService {
         const params: CoreSearchGetSearchAreasListWSParams = {};
 
         const { areas } = await site.read<CoreSearchGetSearchAreasListWSResponse>('core_search_get_search_areas_list', params, {
-            updateFrequency: CoreSite.FREQUENCY_RARELY,
+            updateFrequency: CoreCacheUpdateFrequency.RARELY,
             cacheKey: CoreSearchGlobalSearchService.SEARCH_AREAS_CACHE_KEY,
         });
 
@@ -359,14 +336,6 @@ type CoreSearchViewResultsWSParams = {
 };
 
 /**
- * Params of core_search_get_top_results WS.
- */
-type CoreSearchGetTopResultsWSParams = {
-    query: string; // The search query.
-    filters?: CoreSearchAdvancedWSFilters; // Filters to apply.
-};
-
-/**
  * Search result returned in WS.
  */
 type CoreSearchWSResult = { // Search results.
@@ -390,7 +359,7 @@ type CoreSearchWSResult = { // Search results.
     userid?: number; // User id.
     userurl?: string; // User url.
     userfullname?: string; // User fullname.
-    textformat: number; // Text fields format, it is the same for all of them.
+    textformat: CoreTextFormat; // Text fields format, it is the same for all of them.
 };
 
 /**
@@ -443,11 +412,4 @@ type CoreSearchGetSearchAreasListWSResponse = {
 type CoreSearchViewResultsWSResponse = {
     status: boolean; // Status: true if success.
     warnings?: CoreWSExternalWarning[];
-};
-
-/**
- * Data returned by core_search_get_top_results WS.
- */
-type CoreSearchGetTopResultsWSResponse = {
-    results?: CoreSearchWSResult[];
 };

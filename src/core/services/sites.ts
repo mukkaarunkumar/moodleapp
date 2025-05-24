@@ -19,21 +19,14 @@ import { timeout } from 'rxjs/operators';
 import { CoreApp, CoreStoreConfig } from '@services/app';
 import { CoreEvents } from '@singletons/events';
 import { CoreWS } from '@services/ws';
-import { CoreDomUtils } from '@services/utils/dom';
-import { CoreTextUtils } from '@services/utils/text';
-import { CoreUrlUtils } from '@services/utils/url';
-import { CoreUtils } from '@services/utils/utils';
-import { CoreConstants } from '@/core/constants';
+import { CoreUrl, CoreUrlPartNames } from '@singletons/url';
+import { CoreConstants, MINIMUM_MOODLE_VERSION, MOODLE_RELEASES } from '@/core/constants';
 import {
     CoreSite,
-    CoreSiteWSPreSets,
-    CoreSiteInfo,
     CoreSiteConfig,
-    CoreSitePublicConfigResponse,
-    CoreSiteInfoResponse,
-} from '@classes/site';
+} from '@classes/sites/site';
 import { SQLiteDB, SQLiteDBRecordValues, SQLiteDBTableSchema } from '@classes/sqlitedb';
-import { CoreError } from '@classes/errors/error';
+import { CoreError, CoreErrorDebug } from '@classes/errors/error';
 import { CoreLoginError, CoreLoginErrorOptions } from '@classes/errors/loginerror';
 import { makeSingleton, Translate, Http } from '@singletons';
 import { CoreLogger } from '@singletons/logger';
@@ -45,9 +38,8 @@ import {
     SiteDBEntry,
     SchemaVersionsDBEntry,
 } from '@services/database/sites';
-import { CoreArray } from '../singletons/array';
 import { CoreNetworkError } from '@classes/errors/network-error';
-import { CoreRedirectPayload } from './navigator';
+import { CoreNavigator, CoreRedirectPayload } from './navigator';
 import { CoreSitesFactory } from './sites-factory';
 import { CoreText } from '@singletons/text';
 import { CoreLoginHelper } from '@features/login/services/login-helper';
@@ -64,40 +56,41 @@ import { CoreNetwork } from '@services/network';
 import { CoreUserGuestSupportConfig } from '@features/user/classes/support/guest-support-config';
 import { CoreLang, CoreLangFormat } from '@services/lang';
 import { CoreNative } from '@features/native/services/native';
-import { CoreContentLinksHelper } from '@features/contentlinks/services/contentlinks-helper';
 import { CoreAutoLogoutType, CoreAutoLogout } from '@features/autologout/services/autologout';
+import { CoreCacheManager } from '@services/cache-manager';
+import { CoreSiteInfo, CoreSiteInfoResponse, CoreSitePublicConfigResponse } from '@classes/sites/unauthenticated-site';
+import { CoreSiteWSPreSets } from '@classes/sites/authenticated-site';
+import { firstValueFrom } from 'rxjs';
+import { CoreHTMLClasses } from '@singletons/html-classes';
+import { CoreErrorHelper } from './error-helper';
+import { CoreQueueRunner } from '@classes/queue-runner';
+import { CoreAppDB } from './app-db';
+import { CoreRedirects } from '@singletons/redirects';
+import { CorePromiseUtils } from '@singletons/promise-utils';
+import { CoreOpener } from '@singletons/opener';
+import { CoreAlerts } from './overlays/alerts';
+import { CoreErrorLogs } from '@singletons/error-logs';
 
 export const CORE_SITE_SCHEMAS = new InjectionToken<CoreSiteSchema[]>('CORE_SITE_SCHEMAS');
 export const CORE_SITE_CURRENT_SITE_ID_CONFIG = 'current_site_id';
 
-/*
- * Service to manage and interact with sites.
- * It allows creating tables in the databases of all sites. Each service or component should be responsible of creating
- * their own database tables calling the registerCoreSiteSchema method.
-*/
-@Injectable({ providedIn: 'root' })
-export class CoreSitesProvider {
+/**
+ * Sites DB Manager.
+ */
+class CoreSitesDB {
 
-    // Constants to validate a site version.
-    protected static readonly WORKPLACE_APP = 3;
-    protected static readonly MOODLE_APP = 2;
-    protected static readonly VALID_VERSION = 1;
-    protected static readonly INVALID_VERSION = -1;
+    protected static readonly NOVERSION = 0;
 
-    protected logger: CoreLogger;
-    protected sessionRestored = false;
-    protected currentSite?: CoreSite;
-    protected sites: { [s: string]: CoreSite } = {};
+    protected logger = CoreLogger.getInstance('CoreSitesDB');
     protected siteSchemasMigration: { [siteId: string]: Promise<void> } = {};
     protected siteSchemas: { [name: string]: CoreRegisteredSiteSchema } = {};
     protected pluginsSiteSchemas: { [name: string]: CoreRegisteredSiteSchema } = {};
-    protected siteTables: Record<string, Record<string, CorePromisedValue<CoreDatabaseTable>>> = {};
-    protected schemasTables: Record<string, AsyncInstance<CoreDatabaseTable<SchemaVersionsDBEntry, 'name'>>> = {};
-    protected sitesTable = asyncInstance<CoreDatabaseTable<SiteDBEntry>>();
+    protected schemasTables: Record<string, AsyncInstance<CoreDatabaseTable<SchemaVersionsDBEntry, 'name', never>>> = {};
 
-    constructor(@Optional() @Inject(CORE_SITE_SCHEMAS) siteSchemas: CoreSiteSchema[][] | null) {
-        this.logger = CoreLogger.getInstance('CoreSitesProvider');
-        this.siteSchemas = CoreArray.flatten(siteSchemas ?? []).reduce(
+    protected siteTables: Record<string, Record<string, CorePromisedValue<CoreDatabaseTable>>> = {};
+
+    constructor(siteSchemas: CoreSiteSchema[][] | null) {
+        this.siteSchemas = (siteSchemas ?? []).flat().reduce(
             (siteSchemas, schema) => {
                 siteSchemas[schema.name] = schema;
 
@@ -108,37 +101,339 @@ export class CoreSitesProvider {
     }
 
     /**
-     * Initialize.
+     * Register a site schema in current site.
+     * This function is meant for site plugins to create DB tables in current site. Tables created from within the app
+     * should use the registerCoreSiteSchema method instead.
+     *
+     * @param schema The schema to register.
+     * @param site Site to register the schema to.
+     */
+    async registerSiteSchema(schema: CoreSiteSchema, site: CoreSite): Promise<void> {
+        try {
+            // Site has already been created, apply the schema directly.
+            const schemas: {[name: string]: CoreRegisteredSiteSchema} = {};
+            schemas[schema.name] = schema;
+
+            // Apply it to the specified site only.
+            (schema as CoreRegisteredSiteSchema).siteId = site.getId();
+
+            await this.applySiteSchemas(site, schemas);
+        } finally {
+            this.pluginsSiteSchemas[schema.name] = schema;
+        }
+    }
+
+    /**
+     * Install and upgrade all the registered schemas and tables.
+     *
+     * @param site Site.
+     * @returns Promise resolved when done.
+     */
+    async migrateSiteSchemas(site: CoreSite): Promise<void> {
+        if (!site.getId()) {
+            return;
+        }
+
+        const siteId = site.id;
+
+        if (this.siteSchemasMigration[siteId] !== undefined) {
+            return this.siteSchemasMigration[siteId];
+        }
+
+        this.logger.debug(`Migrating all schemas of ${siteId}`);
+
+        // First create tables not registerd with name/version.
+        const promise = site.getDb().createTableFromSchema(SCHEMA_VERSIONS_TABLE_SCHEMA)
+            .then(() => this.applySiteSchemas(site, this.siteSchemas));
+
+        this.siteSchemasMigration[siteId] = promise;
+
+        return promise.finally(() => {
+            delete this.siteSchemasMigration[siteId];
+        });
+    }
+
+    /**
+     * Install and upgrade the supplied schemas for a certain site.
+     *
+     * @param site Site.
+     * @param schemas Schemas to migrate.
+     */
+    protected async applySiteSchemas(site: CoreSite, schemas: {[name: string]: CoreRegisteredSiteSchema}): Promise<void> {
+        // Fetch installed versions of the schema.
+        const records = await this.getSiteSchemasTable(site).getMany();
+
+        const versions: {[name: string]: number} = {};
+
+        records.forEach((record) => {
+            versions[record.name] = record.version;
+        });
+
+        const promises: Promise<void>[] = [];
+        for (const name in schemas) {
+            const schema = schemas[name];
+            const oldVersion = versions[name] ?? CoreSitesDB.NOVERSION;
+            if (oldVersion >= schema.version || (schema.siteId && site.getId() !== schema.siteId)) {
+                // Version already applied or the schema shouldn't be registered to this site.
+                continue;
+            }
+
+            this.logger.debug(`Migrating schema '${name}' of ${site.id} from version ${oldVersion} to ${schema.version}`);
+
+            promises.push(this.applySiteSchema(site, schema, oldVersion));
+        }
+
+        await Promise.all(promises);
+    }
+
+    /**
+     * Install and upgrade the supplied schema for a certain site.
+     *
+     * @param site Site.
+     * @param schema Schema to migrate.
+     * @param oldVersion Old version of the schema.
+     */
+    protected async applySiteSchema(site: CoreSite, schema: CoreRegisteredSiteSchema, oldVersion: number): Promise<void> {
+        if (!site.id) {
+            return;
+        }
+
+        const db = site.getDb();
+
+        if (schema.tables) {
+            await db.createTablesFromSchema(schema.tables);
+        }
+        if (schema.install && oldVersion === CoreSitesDB.NOVERSION) {
+            await schema.install(db, site.id);
+        }
+        if (schema.migrate && oldVersion > CoreSitesDB.NOVERSION) {
+            await schema.migrate(db, oldVersion, site.id);
+        }
+
+        // Set installed version.
+        await this.getSiteSchemasTable(site).insert({ name: schema.name, version: schema.version });
+    }
+
+    /**
+     * Get schemas table for the given site.
+     *
+     * @param site Site.
+     * @returns Scehmas Table.
+     */
+    protected getSiteSchemasTable(site: CoreSite): AsyncInstance<CoreDatabaseTable<SchemaVersionsDBEntry, 'name'>> {
+        const siteId = site.getId();
+
+        this.schemasTables[siteId] = this.schemasTables[siteId] ?? asyncInstance(
+            () => this.getSiteTable(SCHEMA_VERSIONS_TABLE_NAME, {
+                siteId: siteId,
+                database: site.getDb(),
+                config: { cachingStrategy: CoreDatabaseCachingStrategy.Eager },
+                primaryKeyColumns: ['name'],
+                rowIdColumn: null,
+                onDestroy: () => delete this.schemasTables[siteId],
+            }),
+        );
+
+        return this.schemasTables[siteId];
+    }
+
+    /**
+     * Returns the Site Schema names that can be cleared on space storage.
+     *
+     * @param site The site that will be cleared.
+     * @returns Name of the site schemas.
+     */
+    getSiteTableSchemasToClear(site: CoreSite): string[] {
+        let reset: string[] = [];
+        const schemas = Object.values(this.siteSchemas).concat(Object.values(this.pluginsSiteSchemas));
+
+        schemas.forEach((schema) => {
+            if (schema.canBeCleared && (!schema.siteId || site.getId() === schema.siteId)) {
+                reset = reset.concat(schema.canBeCleared);
+            }
+        });
+
+        return reset;
+    }
+
+    /**
+     * Get site table.
+     *
+     * @param tableName Site table name.
+     * @param options Options to configure table initialization.
+     * @returns Site table.
+     */
+    async getSiteTable<
+        DBRecord extends SQLiteDBRecordValues,
+        PrimaryKeyColumn extends keyof DBRecord,
+        RowIdColumn extends PrimaryKeyColumn,
+    >(
+        tableName: string,
+        options: {
+            siteId: string;
+            config?: Partial<CoreDatabaseConfiguration>;
+            database: SQLiteDB;
+            primaryKeyColumns?: PrimaryKeyColumn[];
+            rowIdColumn?: RowIdColumn | null;
+            onDestroy?(): void;
+        },
+    ): Promise<CoreDatabaseTable<DBRecord, PrimaryKeyColumn, RowIdColumn>> {
+        const siteId = options.siteId;
+
+        if (!(siteId in this.siteTables)) {
+            this.siteTables[siteId] = {};
+        }
+
+        if (!(tableName in this.siteTables[siteId])) {
+            const promisedTable = this.siteTables[siteId][tableName] = new CorePromisedValue();
+            const table = new CoreDatabaseTableProxy<DBRecord, PrimaryKeyColumn, RowIdColumn>(
+                options.config ?? {},
+                options.database,
+                tableName,
+                options.primaryKeyColumns,
+                options.rowIdColumn,
+            );
+
+            options.onDestroy && table.addListener({ onDestroy: options.onDestroy });
+
+            await table.initialize();
+
+            promisedTable.resolve(table as unknown as CoreDatabaseTable);
+        }
+
+        return this.siteTables[siteId][tableName] as unknown as Promise<CoreDatabaseTable<DBRecord, PrimaryKeyColumn, RowIdColumn>>;
+    }
+
+    /**
+     * Delete all tables of a site.
+     *
+     * @param siteId Site ID.
+     */
+    async deleteSiteTables(siteId: string): Promise<void> {
+        if (!(siteId in this.siteTables)) {
+            return;
+        }
+
+        await Promise.all(
+            Object
+                .values(this.siteTables[siteId])
+                .map(promisedTable => promisedTable.then(table => table.destroy())),
+        );
+
+        delete this.siteTables[siteId];
+    }
+
+}
+
+/**
+ * Service to manage and interact with sites.
+ * It allows creating tables in the databases of all sites. Each service or component should be responsible of creating
+ * their own database tables calling the registerCoreSiteSchema method.
+ */
+@Injectable({ providedIn: 'root' })
+export class CoreSitesProvider {
+
+    // Constants to validate a site version.
+    protected static readonly WORKPLACE_APP = 3;
+    protected static readonly MOODLE_APP = 2;
+    protected static readonly VALID_VERSION = 1;
+    protected static readonly INVALID_VERSION = -1;
+
+    protected logger = CoreLogger.getInstance('CoreSitesProvider');
+    protected sessionRestored = false;
+    protected currentSite?: CoreSite;
+    protected sites: { [s: string]: CoreSite } = {};
+
+    protected sitesTable = asyncInstance<CoreDatabaseTable<SiteDBEntry>>();
+    protected sitesDB: CoreSitesDB; // To handle sites DB.
+
+    // Variables to run code after login navigation.
+    protected isLoginNavigationFinished = false;
+    protected afterLoginNavigationQueue: CoreSitesAfterLoginNavigationProcess[] = [];
+    protected afterLoginNavigationQueueRunner = new CoreQueueRunner(1, true);
+
+    constructor(@Optional() @Inject(CORE_SITE_SCHEMAS) siteSchemas: CoreSiteSchema[][] | null) {
+        this.sitesDB = new CoreSitesDB(siteSchemas);
+    }
+
+    /**
+     * @inheritdoc
      */
     initialize(): void {
+        // Initialize general site events.
         CoreEvents.on(CoreEvents.SITE_DELETED, async ({ siteId }) => {
-            if (!siteId || !(siteId in this.siteTables)) {
+            if (!siteId) {
                 return;
             }
 
-            await Promise.all(
-                Object
-                    .values(this.siteTables[siteId])
-                    .map(promisedTable => promisedTable.then(table => table.destroy())),
-            );
-
-            delete this.siteTables[siteId];
+            await this.sitesDB.deleteSiteTables(siteId);
         });
+
+        CoreEvents.on(CoreEvents.LOGOUT, async () => {
+            // Unload lang custom strings.
+            CoreLang.clearCustomStrings();
+
+            // Remove version classes from body.
+            CoreHTMLClasses.removeSiteClasses();
+        });
+
+        CoreEvents.on(CoreEvents.LOGIN, async (data) => {
+            if (data.siteId) {
+                const site = await CoreSites.getSite(data.siteId);
+                const info = site.getInfo();
+                if (info) {
+                    CoreHTMLClasses.addSiteClasses(info);
+                }
+            }
+
+            CoreLang.loadCustomStringsFromSite();
+        });
+
+        // Site config is checked in login.
+        CoreEvents.on(CoreEvents.LOGIN_SITE_CHECKED, (data) => {
+            CoreHTMLClasses.addSiteUrlClass(data.config.httpswwwroot);
+        });
+
+        // Unload temporary styles when site config is "unchecked" in login.
+        CoreEvents.on(CoreEvents.LOGIN_SITE_UNCHECKED, ({ loginSuccessful }) => {
+            if (loginSuccessful) {
+                // The classes are already added in LOGIN_SITE_CHECKED.
+                return;
+            }
+
+            CoreHTMLClasses.removeSiteClasses();
+        });
+
+        CoreEvents.on(CoreEvents.SITE_UPDATED, async (data) => {
+            if (data.siteId !== CoreSites.getCurrentSiteId()) {
+                return;
+            }
+
+            CoreLang.loadCustomStringsFromSite();
+            CoreHTMLClasses.addSiteClasses(data);
+        });
+
+        CoreEvents.on(CoreEvents.SITE_ADDED, (data) => {
+            if (data.siteId !== CoreSites.getCurrentSiteId()) {
+                return;
+            }
+
+            CoreLang.loadCustomStringsFromSite();
+            CoreHTMLClasses.addSiteClasses(data);
+        });
+
+        CoreCacheManager.registerInvalidateListener(() => this.invalidateCaches());
     }
 
     /**
      * Initialize database.
      */
     async initializeDatabase(): Promise<void> {
-        try {
-            await CoreApp.createTablesFromSchema(APP_SCHEMA);
-        } catch {
-            // Ignore errors.
-        }
+        await CoreAppDB.createTablesFromSchema(APP_SCHEMA);
 
         const sitesTable = new CoreDatabaseTableProxy<SiteDBEntry>(
             { cachingStrategy: CoreDatabaseCachingStrategy.Eager },
-            CoreApp.getDB(),
+            CoreAppDB.getDB(),
             SITES_TABLE_NAME,
         );
 
@@ -156,7 +451,8 @@ export class CoreSitesProvider {
      */
     async getSiteTable<
         DBRecord extends SQLiteDBRecordValues,
-        PrimaryKeyColumn extends keyof DBRecord
+        PrimaryKeyColumn extends keyof DBRecord,
+        RowIdColumn extends PrimaryKeyColumn,
     >(
         tableName: string,
         options: Partial<{
@@ -164,33 +460,19 @@ export class CoreSitesProvider {
             config: Partial<CoreDatabaseConfiguration>;
             database: SQLiteDB;
             primaryKeyColumns: PrimaryKeyColumn[];
+            rowIdColumn: RowIdColumn | null;
             onDestroy(): void;
         }> = {},
-    ): Promise<CoreDatabaseTable<DBRecord, PrimaryKeyColumn>> {
+    ): Promise<CoreDatabaseTable<DBRecord, PrimaryKeyColumn, RowIdColumn>> {
         const siteId = options.siteId ?? this.getCurrentSiteId();
 
-        if (!(siteId in this.siteTables)) {
-            this.siteTables[siteId] = {};
-        }
+        const optionsWithMandatory = {
+            ...options,
+            siteId,
+            database: options.database ?? await this.getSiteDb(siteId),
+        };
 
-        if (!(tableName in this.siteTables[siteId])) {
-            const promisedTable = this.siteTables[siteId][tableName] = new CorePromisedValue();
-            const database = options.database ?? await this.getSiteDb(siteId);
-            const table = new CoreDatabaseTableProxy<DBRecord, PrimaryKeyColumn>(
-                options.config ?? {},
-                database,
-                tableName,
-                options.primaryKeyColumns,
-            );
-
-            options.onDestroy && table.addListener({ onDestroy: options.onDestroy });
-
-            await table.initialize();
-
-            promisedTable.resolve(table as unknown as CoreDatabaseTable);
-        }
-
-        return this.siteTables[siteId][tableName] as unknown as Promise<CoreDatabaseTable<DBRecord, PrimaryKeyColumn>>;
+        return this.sitesDB.getSiteTable(tableName, optionsWithMandatory);
     }
 
     /**
@@ -214,14 +496,18 @@ export class CoreSitesProvider {
      *
      * @param siteUrl URL of the site to check.
      * @param protocol Protocol to use first.
+     * @param origin Origin of this check site call.
      * @returns A promise resolved when the site is checked.
      */
-    async checkSite(siteUrl: string, protocol: string = 'https://'): Promise<CoreSiteCheckResponse> {
+    async checkSite(siteUrl: string, protocol: string = 'https://', origin = 'unknown'): Promise<CoreSiteCheckResponse> {
         // The formatURL function adds the protocol if is missing.
-        siteUrl = CoreUrlUtils.formatURL(siteUrl);
+        siteUrl = CoreUrl.formatURL(siteUrl);
 
-        if (!CoreUrlUtils.isHttpURL(siteUrl)) {
-            throw new CoreError(Translate.instant('core.login.invalidsite'));
+        if (!CoreUrl.isHttpURL(siteUrl)) {
+            throw new CoreError(Translate.instant('core.login.invalidsite'), { debug: {
+                code: 'invalidprotocol',
+                details: `URL contains an invalid protocol when checking site.<br><br>Origin: ${origin}.<br><br>URL: ${siteUrl}.`,
+            } });
         }
 
         if (!CoreNetwork.isOnline()) {
@@ -237,7 +523,7 @@ export class CoreSitesProvider {
             }
 
             // Retry with the other protocol.
-            protocol = protocol == 'https://' ? 'http://' : 'https://';
+            protocol = protocol === 'https://' ? 'http://' : 'https://';
 
             try {
                 return await this.checkSiteWithProtocol(siteUrl, protocol);
@@ -247,9 +533,9 @@ export class CoreSitesProvider {
                 }
 
                 // Site doesn't exist. Return the error message.
-                if (CoreTextUtils.getErrorMessageFromError(error)) {
+                if (CoreErrorHelper.getErrorMessageFromError(error)) {
                     throw error;
-                } else if (CoreTextUtils.getErrorMessageFromError(secondError)) {
+                } else if (CoreErrorHelper.getErrorMessageFromError(secondError)) {
                     throw secondError;
                 } else {
                     throw new CoreError(Translate.instant('core.sitenotfoundhelp'));
@@ -270,7 +556,7 @@ export class CoreSitesProvider {
         siteUrl = siteUrl.replace(/^https?:\/\//i, protocol);
 
         // Create a temporary site to fetch site info.
-        let temporarySite = CoreSitesFactory.makeSite(undefined, siteUrl);
+        const temporarySite = CoreSitesFactory.makeUnauthenticatedSite(siteUrl);
         let config: CoreSitePublicConfigResponse | undefined;
 
         try {
@@ -282,7 +568,7 @@ export class CoreSitesProvider {
             }
 
             // Try to add or remove 'www'.
-            temporarySite = CoreSitesFactory.makeSite(undefined, CoreUrlUtils.addOrRemoveWWW(siteUrl));
+            temporarySite.setURL(CoreUrl.addOrRemoveWWW(temporarySite.getURL()));
 
             try {
                 config = await temporarySite.getPublicConfig();
@@ -293,7 +579,7 @@ export class CoreSitesProvider {
                 }
 
                 // App didn't receive a WS response, probably cannot connect. Prioritize first error if it's valid.
-                if (CoreTextUtils.getErrorMessageFromError(error)) {
+                if (CoreErrorHelper.getErrorMessageFromError(error)) {
                     throw error;
                 } else {
                     throw secondError;
@@ -304,19 +590,23 @@ export class CoreSitesProvider {
         // Check that the user can authenticate.
         if (!config.enablewebservices) {
             throw this.createCannotConnectLoginError(config.httpswwwroot || config.wwwroot, {
-                supportConfig: new CoreUserGuestSupportConfig(config),
-                errorcode: 'webservicesnotenabled',
-                errorDetails: Translate.instant('core.login.webservicesnotenabled'),
+                supportConfig: new CoreUserGuestSupportConfig(temporarySite, config),
                 critical: true,
+                debug: {
+                    code: 'webservicesnotenabled',
+                    details: Translate.instant('core.login.webservicesnotenabled'),
+                },
             });
         }
 
         if (!config.enablemobilewebservice) {
             throw this.createCannotConnectLoginError(config.httpswwwroot || config.wwwroot, {
-                supportConfig: new CoreUserGuestSupportConfig(config),
-                errorcode: 'mobileservicesnotenabled',
-                errorDetails: Translate.instant('core.login.mobileservicesnotenabled'),
+                supportConfig: new CoreUserGuestSupportConfig(temporarySite, config),
                 critical: true,
+                debug: {
+                    code: 'mobileservicesnotenabled',
+                    details: Translate.instant('core.login.mobileservicesnotenabled'),
+                },
             });
         }
 
@@ -364,14 +654,16 @@ export class CoreSitesProvider {
         siteUrl: string,
         error: CoreError | CoreAjaxError | CoreAjaxWSError,
     ): Promise<CoreLoginError> {
-        if (error instanceof CoreAjaxError || !('errorcode' in error)) {
+        if (error instanceof CoreAjaxError || (!('debug' in error) && !('errorcode' in error))) {
             // The WS didn't return data, probably cannot connect.
             return new CoreLoginError({
                 title: Translate.instant('core.cannotconnect'),
                 message: Translate.instant('core.siteunavailablehelp', { site: siteUrl }),
-                errorcode: 'publicconfigfailed',
-                errorDetails: error.message || '',
                 critical: false, // Allow fallback to http if siteUrl uses https.
+                debug: {
+                    code: 'publicconfigfailed',
+                    details: error.message || 'Failed getting public config',
+                },
             });
         }
 
@@ -380,89 +672,35 @@ export class CoreSitesProvider {
             critical: true,
             title: Translate.instant('core.cannotconnect'),
             message: Translate.instant('core.siteunavailablehelp', { site: siteUrl }),
-            errorcode: error.errorcode,
-            supportConfig: error.supportConfig,
-            errorDetails: error.errorDetails ?? error.message,
+            supportConfig: 'supportConfig' in error ? error.supportConfig : undefined,
+            debug: error.debug,
         };
 
-        if (error.errorcode === 'codingerror') {
+        if (error.debug?.code === 'codingerror') {
             // This could be caused by a redirect. Check if it's the case.
-            const redirect = await CoreUtils.checkRedirect(siteUrl);
+            const redirect = await CoreRedirects.checkRedirect(siteUrl);
 
             options.message = Translate.instant('core.siteunavailablehelp', { site: siteUrl });
 
             if (redirect) {
-                options.errorcode = 'sitehasredirect';
-                options.errorDetails = Translate.instant('core.login.sitehasredirect');
                 options.critical = false; // Keep checking fallback URLs.
+                options.debug = {
+                    code: 'sitehasredirect',
+                    details: Translate.instant('core.login.sitehasredirect'),
+                };
             }
-        } else if (error.errorcode === 'invalidrecord') {
+        } else if (error.debug?.code === 'invalidrecord') {
             // WebService not found, site not supported.
             options.message = Translate.instant('core.siteunavailablehelp', { site: siteUrl });
-            options.errorcode = 'invalidmoodleversion';
-            options.errorDetails = Translate.instant('core.login.invalidmoodleversion', { $a: CoreSite.MINIMUM_MOODLE_VERSION });
-        } else if (error.errorcode === 'redirecterrordetected') {
+            options.debug = {
+                code: 'invalidmoodleversion',
+                details: Translate.instant('core.login.invalidmoodleversion', { $a: MINIMUM_MOODLE_VERSION }),
+            };
+        } else if (error.debug?.code === 'redirecterrordetected') {
             options.critical = false; // Keep checking fallback URLs.
         }
 
         return new CoreLoginError(options);
-    }
-
-    /**
-     * Check if a site exists.
-     *
-     * @param siteUrl URL of the site to check.
-     * @returns A promise to be resolved if the site exists.
-     * @deprecated since app 4.0. Now the app calls uses tool_mobile_get_public_config to check if site exists.
-     */
-    async siteExists(siteUrl: string): Promise<void> {
-        let data: CoreSitesLoginTokenResponse;
-
-        // Use a valid path first.
-        siteUrl = CoreUrlUtils.removeUrlParams(siteUrl);
-
-        try {
-            const lang = await CoreLang.getCurrentLanguage(CoreLangFormat.LMS);
-
-            data = await Http.post(`${siteUrl}/login/token.php?lang=${lang}`, { appsitecheck: 1 })
-                .pipe(timeout(CoreWS.getRequestTimeout()))
-                .toPromise();
-        } catch (error) {
-            throw this.createCannotConnectLoginError(null, {
-                supportConfig: await CoreUserGuestSupportConfig.forSite(siteUrl),
-                errorcode: 'sitecheckfailed',
-                errorDetails: CoreDomUtils.getErrorMessage(error) ?? undefined,
-            });
-        }
-
-        if (data === null) {
-            // Cannot connect.
-            throw this.createCannotConnectLoginError(null, {
-                supportConfig: await CoreUserGuestSupportConfig.forSite(siteUrl),
-                errorcode: 'appsitecheckfailed',
-                errorDetails: 'A request to /login/token.php with appsitecheck=1 returned an empty response',
-            });
-        }
-
-        if (data.errorcode && (data.errorcode == 'enablewsdescription' || data.errorcode == 'requirecorrectaccess')) {
-            throw this.createCannotConnectLoginError(siteUrl, {
-                supportConfig: await CoreUserGuestSupportConfig.forSite(siteUrl),
-                critical: data.errorcode == 'enablewsdescription',
-                errorcode: data.errorcode,
-                errorDetails: data.error,
-            });
-        }
-
-        if (data.error && data.error == 'Web services must be enabled in Advanced features.') {
-            throw this.createCannotConnectLoginError(siteUrl, {
-                supportConfig: await CoreUserGuestSupportConfig.forSite(siteUrl),
-                critical: true,
-                errorcode: 'enablewsdescription',
-                errorDetails: data.error,
-            });
-        }
-
-        // Other errors are not being checked because invalid login will be always raised and we cannot differ them.
     }
 
     /**
@@ -497,21 +735,23 @@ export class CoreSitesProvider {
         let data: CoreSitesLoginTokenResponse;
 
         try {
-            data = await Http.post(loginUrl, params).pipe(timeout(CoreWS.getRequestTimeout())).toPromise();
+            data = await firstValueFrom(Http.post(loginUrl, params).pipe(timeout(CoreWS.getRequestTimeout())));
         } catch (error) {
-            throw new CoreError(
-                this.isLoggedIn()
-                    ? Translate.instant('core.siteunavailablehelp', { site: this.currentSite?.siteUrl })
-                    : Translate.instant('core.sitenotfoundhelp'),
-            );
+            throw this.createCannotConnectLoginError(siteUrl, {
+                debug: {
+                    code: 'logintokenerror',
+                    details: error.message,
+                },
+            });
         }
 
         if (data === undefined) {
-            throw new CoreError(
-                this.isLoggedIn()
-                    ? Translate.instant('core.siteunavailablehelp', { site: this.currentSite?.siteUrl })
-                    : Translate.instant('core.sitenotfoundhelp'),
-            );
+            throw this.createCannotConnectLoginError(siteUrl, {
+                debug: {
+                    code: 'logintokenempty',
+                    details: 'The request to /login/token.php returned an empty response',
+                },
+            });
         }
 
         if (data.token !== undefined) {
@@ -523,29 +763,33 @@ export class CoreSitesProvider {
         }
 
         // We only allow one retry (to avoid loops).
-        if (!retry && data.errorcode == 'requirecorrectaccess') {
-            siteUrl = CoreUrlUtils.addOrRemoveWWW(siteUrl);
+        if (!retry && data.errorcode === 'requirecorrectaccess') {
+            siteUrl = CoreUrl.addOrRemoveWWW(siteUrl);
 
             return this.getUserToken(siteUrl, username, password, service, true);
         }
 
-        if (data.errorcode == 'missingparam') {
+        if (data.errorcode === 'missingparam') {
             // It seems the server didn't receive all required params, it could be due to a redirect.
-            const redirect = await CoreUtils.checkRedirect(loginUrl);
+            const redirect = await CoreRedirects.checkRedirect(loginUrl);
 
             if (redirect) {
                 throw this.createCannotConnectLoginError(siteUrl, {
                     supportConfig: await CoreUserGuestSupportConfig.forSite(siteUrl),
-                    errorcode: 'sitehasredirect',
-                    errorDetails: Translate.instant('core.login.sitehasredirect'),
+                    debug: {
+                        code: 'sitehasredirect',
+                        details: Translate.instant('core.login.sitehasredirect'),
+                    },
                 });
             }
         }
 
         throw this.createCannotConnectLoginError(siteUrl, {
             supportConfig: await CoreUserGuestSupportConfig.forSite(siteUrl),
-            errorcode: data.errorcode,
-            errorDetails: data.error,
+            debug: {
+                code: data.errorcode ?? 'loginfailed',
+                details: data.error ?? 'Could not get a user token in /login/token.php',
+            },
         });
     }
 
@@ -570,12 +814,12 @@ export class CoreSitesProvider {
             login = true;
         }
 
-        // Create a "candidate" site to fetch the site info.
-        let candidateSite = CoreSitesFactory.makeSite(undefined, siteUrl, token, undefined, privateToken);
+        // Validate the site.
+        const authSite = CoreSitesFactory.makeAuthenticatedSite(siteUrl, token, { privateToken });
         let isNewSite = true;
 
         try {
-            const info = await candidateSite.fetchSiteInfo();
+            const info = await authSite.fetchSiteInfo();
 
             const result = this.isValidMoodleVersion(info);
             if (result !== CoreSitesProvider.VALID_VERSION) {
@@ -585,33 +829,33 @@ export class CoreSitesProvider {
             const siteId = this.createSiteID(info.siteurl, info.username);
 
             // Check if the site already exists.
-            const site = await CoreUtils.ignoreErrors<CoreSite>(this.getSite(siteId));
+            const storedSite = await CorePromiseUtils.ignoreErrors(this.getSite(siteId));
+            let site: CoreSite;
 
-            if (site) {
-                // Site already exists, update its data and use it.
+            if (storedSite) {
+                // Site already exists.
                 isNewSite = false;
-                candidateSite = site;
-                candidateSite.setToken(token);
-                candidateSite.setPrivateToken(privateToken);
-                candidateSite.setInfo(info);
-                candidateSite.setOAuthId(oauthId);
-                candidateSite.setLoggedOut(false);
+                site = storedSite;
+                site.setToken(token);
+                site.setPrivateToken(privateToken);
+                site.setInfo(info);
+                site.setOAuthId(oauthId);
+                site.setLoggedOut(false);
             } else {
                 // New site, set site ID and info.
                 isNewSite = true;
-                candidateSite.setId(siteId);
-                candidateSite.setInfo(info);
-                candidateSite.setOAuthId(oauthId);
+                site = CoreSitesFactory.makeSite(siteId, siteUrl, token, { info, privateToken });
+                site.setOAuthId(oauthId);
 
                 // Create database tables before login and before any WS call.
-                await this.migrateSiteSchemas(candidateSite);
+                await this.sitesDB.migrateSiteSchemas(site);
             }
 
             // Try to get the site config.
             let config: CoreSiteConfig | undefined;
 
             try {
-                config = await this.getSiteConfig(candidateSite);
+                config = await this.getSiteConfig(site);
             } catch (error) {
                 // Ignore errors if it's not a new site, we'll use the config already stored.
                 if (isNewSite) {
@@ -620,19 +864,18 @@ export class CoreSitesProvider {
             }
 
             if (config !== undefined) {
-                candidateSite.setConfig(config);
+                site.setConfig(config);
             }
 
             // Add site to sites list.
             await this.addSite(siteId, siteUrl, token, info, privateToken, config, oauthId);
-            this.sites[siteId] = candidateSite;
+            this.sites[siteId] = site;
 
             if (login) {
-                // Turn candidate site into current site.
-                this.currentSite = candidateSite;
+                this.currentSite = site;
                 // Store session.
                 await this.login(siteId);
-            } else if (this.currentSite && this.currentSite.getId() == siteId) {
+            } else if (this.currentSite && this.currentSite.getId() === siteId) {
                 // Current site has just been updated, trigger the event.
                 CoreEvents.trigger(CoreEvents.SITE_UPDATED, info, siteId);
             }
@@ -642,7 +885,7 @@ export class CoreSitesProvider {
             return siteId;
         } catch (error) {
             // Error invaliddevice is returned by Workplace server meaning the same as connecttoworkplaceapp.
-            if (error && error.errorcode == 'invaliddevice') {
+            if (error && error.errorcode === 'invaliddevice') {
                 return this.treatInvalidAppVersion(CoreSitesProvider.WORKPLACE_APP);
             }
 
@@ -658,23 +901,33 @@ export class CoreSitesProvider {
      * @returns A promise rejected with the error info.
      */
     protected async treatInvalidAppVersion(result: number, siteId?: string): Promise<never> {
-        let errorCode: string | undefined;
+        let debug: CoreErrorDebug | undefined;
         let errorKey: string | undefined;
         let translateParams = {};
 
         switch (result) {
             case CoreSitesProvider.MOODLE_APP:
                 errorKey = 'core.login.connecttomoodleapp';
-                errorCode = 'connecttomoodleapp';
+                debug = {
+                    code: 'connecttomoodleapp',
+                    details: 'Cannot connect to app',
+                };
                 break;
             case CoreSitesProvider.WORKPLACE_APP:
                 errorKey = 'core.login.connecttoworkplaceapp';
-                errorCode = 'connecttoworkplaceapp';
+                debug = {
+                    code: 'connecttoworkplaceapp',
+                    details: 'Cannot connect to app',
+                };
                 break;
             default:
-                errorCode = 'invalidmoodleversion';
                 errorKey = 'core.login.invalidmoodleversion';
-                translateParams = { $a: CoreSite.MINIMUM_MOODLE_VERSION };
+                translateParams = { $a: MINIMUM_MOODLE_VERSION };
+                debug = {
+                    code: 'invalidmoodleversion',
+                    details: 'Cannot connect to app',
+                };
+                break;
         }
 
         if (siteId) {
@@ -682,8 +935,8 @@ export class CoreSitesProvider {
         }
 
         throw new CoreLoginError({
+            debug,
             message: Translate.instant(errorKey, translateParams),
-            errorcode: errorCode,
             loggedOut: true,
         });
     }
@@ -696,17 +949,7 @@ export class CoreSitesProvider {
      * @returns Site ID.
      */
     createSiteID(siteUrl: string, username: string): string {
-        return <string> Md5.hashAsciiStr(siteUrl + username);
-    }
-
-    /**
-     * Function for determine which service we should use (default or extended plugin).
-     *
-     * @returns The service shortname.
-     * @deprecated since app 4.0
-     */
-    determineService(): string {
-        return CoreConstants.CONFIG.wsservice;
+        return Md5.hashAsciiStr(siteUrl + username);
     }
 
     /**
@@ -719,6 +962,7 @@ export class CoreSitesProvider {
      *                 the username 'myuser'. Don't use it if you don't want to filter by username.
      * @param options.checkRoot Whether to check if the URL is the root URL of a site.
      * @param options.openBrowserRoot Whether to open in browser if it's root URL and it belongs to current site.
+     * @deprecated since 5.0. Use CoreContentLinksHelper.visitLink instead.
      */
     async visitLink(
         url: string,
@@ -729,17 +973,9 @@ export class CoreSitesProvider {
             openBrowserRoot?: boolean;
         } = {},
     ): Promise<void> {
-        const treated = await CoreContentLinksHelper.handleLink(url, options.username, options.checkRoot, options.openBrowserRoot);
+        const { CoreContentLinksHelper } = await import('@features/contentlinks/services/contentlinks-helper');
 
-        if (treated) {
-            return;
-        }
-
-        const site = options.siteId
-            ? await CoreSites.getSite(options.siteId)
-            : CoreSites.getCurrentSite();
-
-        await site?.openInBrowserWithAutoLogin(url);
+        await CoreContentLinksHelper.visitLink(url, options);
     }
 
     /**
@@ -757,7 +993,7 @@ export class CoreSitesProvider {
         if (info.version) {
             const version = parseInt(info.version, 10);
             if (!isNaN(version)) {
-                if (version >= CoreSite.MOODLE_RELEASES[CoreSite.MINIMUM_MOODLE_VERSION]) {
+                if (version >= MOODLE_RELEASES[MINIMUM_MOODLE_VERSION]) {
                     return this.validateWorkplaceVersion(info);
                 }
             }
@@ -766,7 +1002,7 @@ export class CoreSitesProvider {
         // We couldn't validate by version number. Let's try to validate by release number.
         const release = this.getReleaseNumber(info.release || '');
         if (release) {
-            if (release >= CoreSite.MINIMUM_MOODLE_VERSION) {
+            if (release >= MINIMUM_MOODLE_VERSION) {
                 return this.validateWorkplaceVersion(info);
             }
         }
@@ -782,7 +1018,9 @@ export class CoreSitesProvider {
      * @returns Either VALID_VERSION, WORKPLACE_APP or MOODLE_APP.
      */
     protected validateWorkplaceVersion(info: CoreSiteInfoResponse): number {
-        const isWorkplace = !!info.functions && info.functions.some((func) => func.name == 'tool_program_get_user_programs');
+        const isWorkplace = !!info.functions && info.functions.some((func) =>
+            func.name === 'tool_program_get_user_programs' ||
+            func.name === 'tool_catalogue_get_user_catalogue');
 
         const isWPEnabled = this.isWorkplaceEnabled();
 
@@ -846,7 +1084,6 @@ export class CoreSitesProvider {
      * @param privateToken User's private token.
      * @param config Site config (from tool_mobile_get_config).
      * @param oauthId OAuth ID. Only if the authentication was using an OAuth method.
-     * @returns Promise resolved when done.
      */
     async addSite(
         id: string,
@@ -888,7 +1125,7 @@ export class CoreSitesProvider {
      * Check the required minimum version of the app for a site and shows a download dialog.
      *
      * @param config Config object of the site.
-     * @returns Resolved with if meets the requirements, rejected otherwise.
+     * @returns Resolved if meets the requirements, rejected otherwise.
      */
     protected async checkRequiredMinimumVersion(config?: CoreSitePublicConfigResponse): Promise<void> {
         if (!config || !config.tool_mobile_minimumversion) {
@@ -910,28 +1147,30 @@ export class CoreSitesProvider {
             const downloadUrl = CoreApp.getAppStoreUrl(storesConfig);
             let promise: Promise<unknown>;
 
-            if (downloadUrl != null) {
+            if (downloadUrl) {
                 // Do not block interface.
-                promise = CoreDomUtils.showConfirm(
+                promise = CoreAlerts.confirm(
                     Translate.instant('core.updaterequireddesc', { $a: config.tool_mobile_minimumversion }),
-                    Translate.instant('core.updaterequired'),
-                    Translate.instant('core.download'),
-                    Translate.instant(siteId ? 'core.mainmenu.logout' : 'core.cancel'),
-                ).then(() => CoreUtils.openInBrowser(downloadUrl, { showBrowserWarning: false })).catch(() => {
+                    {
+                        header: Translate.instant('core.updaterequired'),
+                        okText: Translate.instant('core.download'),
+                        cancelText: Translate.instant(siteId ? 'core.mainmenu.logout' : 'core.cancel'),
+                    },
+                ).then(() => CoreOpener.openInBrowser(downloadUrl, { showBrowserWarning: false })).catch(() => {
                     // Do nothing.
                 });
             } else {
                 // Do not block interface.
-                promise = CoreDomUtils.showAlert(
-                    Translate.instant('core.updaterequired'),
-                    Translate.instant('core.updaterequireddesc', { $a: config.tool_mobile_minimumversion }),
-                ).then((alert) => alert.onWillDismiss());
+                promise = CoreAlerts.show({
+                    header: Translate.instant('core.updaterequired'),
+                    message: Translate.instant('core.updaterequireddesc', { $a: config.tool_mobile_minimumversion }),
+                }).then((alert) => alert.onWillDismiss());
             }
 
             promise.finally(() => {
                 if (siteId) {
                     // Logout the currentSite and expire the token.
-                    this.logout();
+                    this.internalLogout();
                     this.setSiteLoggedOut(siteId);
                 }
             });
@@ -999,7 +1238,6 @@ export class CoreSitesProvider {
      * Get site public config and check if app can access the site.
      *
      * @param site Site.
-     * @returns Promise resolved when done.
      */
     protected async getPublicConfigAndCheckApplication(site: CoreSite): Promise<void> {
         try {
@@ -1041,11 +1279,7 @@ export class CoreSitesProvider {
      * @returns Current site home ID.
      */
     getCurrentSiteHomeId(): number {
-        if (this.currentSite) {
-            return this.currentSite.getSiteHomeId();
-        } else {
-            return 1;
-        }
+        return this.currentSite?.getSiteHomeId() ?? 1;
     }
 
     /**
@@ -1054,11 +1288,7 @@ export class CoreSitesProvider {
      * @returns Current site ID.
      */
     getCurrentSiteId(): string {
-        if (this.currentSite) {
-            return this.currentSite.getId();
-        } else {
-            return '';
-        }
+        return this.currentSite?.getId() || '';
     }
 
     /**
@@ -1077,20 +1307,19 @@ export class CoreSitesProvider {
      */
     isLoggedIn(): boolean {
         return this.currentSite !== undefined && this.currentSite.token !== undefined &&
-            this.currentSite.token != '';
+            this.currentSite.token !== '';
     }
 
     /**
      * Delete a site from the sites list.
      *
      * @param siteId ID of the site to delete.
-     * @returns Promise to be resolved when the site is deleted.
      */
     async deleteSite(siteId: string): Promise<void> {
         this.logger.debug(`Delete site ${siteId}`);
 
-        if (this.currentSite !== undefined && this.currentSite.id == siteId) {
-            this.logout();
+        if (this.currentSite !== undefined && this.currentSite.id === siteId) {
+            this.internalLogout();
         }
 
         const site = await this.getSite(siteId);
@@ -1101,12 +1330,12 @@ export class CoreSitesProvider {
         delete this.sites[siteId];
 
         // DB remove shouldn't fail, but we'll go ahead even if it does.
-        await CoreUtils.ignoreErrors(this.sitesTable.deleteByPrimaryKey({ id: siteId }));
+        await CorePromiseUtils.ignoreErrors(this.sitesTable.deleteByPrimaryKey({ id: siteId }));
 
         // Site deleted from sites list, now delete the folder.
         await site.deleteFolder();
 
-        await CoreUtils.ignoreErrors(CoreNative.plugin('secureStorage')?.deleteCollection(siteId));
+        await CorePromiseUtils.ignoreErrors(CoreNative.plugin('secureStorage')?.deleteCollection(siteId));
 
         CoreEvents.trigger(CoreEvents.SITE_DELETED, site, siteId);
     }
@@ -1137,7 +1366,7 @@ export class CoreSitesProvider {
             throw new CoreError('No current site found.');
         }
 
-        if (this.currentSite && this.currentSite.getId() === siteId) {
+        if (this.currentSite?.getId() === siteId) {
             return this.currentSite;
         }
 
@@ -1148,9 +1377,22 @@ export class CoreSitesProvider {
         // Retrieve and create the site.
         let record: SiteDBEntry;
         try {
-            record = await this.loadSiteTokens(await this.sitesTable.getOneByPrimaryKey({ id: siteId }));
-        } catch {
-            throw new CoreError('SiteId not found.');
+            record = await this.sitesTable.getOneByPrimaryKey({ id: siteId });
+        } catch (error) {
+            throw new CoreError(`SiteId not found in the app database: ${siteId}. ` +
+                CoreErrorHelper.getErrorMessageFromError(error));
+        }
+
+        try {
+            record = await this.loadSiteTokens(record);
+        } catch (error) {
+            // Error loading site tokens from secure storage. User will be asked to enter the password again.
+            CoreErrorLogs.addErrorLog({
+                message: `Error loading tokens for site: ${siteId}. Error: ` + CoreErrorHelper.getErrorMessageFromError(error)
+                    + ' - ' + JSON.stringify(error),
+                time: Date.now(),
+                type: 'Error',
+            });
         }
 
         try {
@@ -1162,14 +1404,17 @@ export class CoreSitesProvider {
 
     /**
      * Get a site directly from the database, without using any optimizations.
+     * This function is used to read the site from DB during the app initialization, to avoid deadlocks.
      *
      * @param siteId Site id.
      * @returns Site.
      */
-    async getSiteFromDB(siteId: string): Promise<CoreSite> {
-        const db = CoreApp.getDB();
+    protected async getSiteFromDB(siteId: string): Promise<CoreSite> {
+        const db = CoreAppDB.getDB();
 
         try {
+            // Do not use sitesTable.getOneByPrimaryKey in here, it can cause a deadlock
+            // if this function is used during the app initialization.
             const record = await db.getRecord<SiteDBEntry>(SITES_TABLE_NAME, { id: siteId });
 
             return this.makeSiteFromSiteListEntry(record);
@@ -1208,7 +1453,7 @@ export class CoreSitesProvider {
      * @param entry Site list entry.
      * @returns Promised resolved with the created site.
      */
-    async addSiteFromSiteListEntry(entry: SiteDBEntry): Promise<CoreSite> {
+    protected async addSiteFromSiteListEntry(entry: SiteDBEntry): Promise<CoreSite> {
         if (this.sites[entry.id] !== undefined) {
             return this.sites[entry.id];
         }
@@ -1216,7 +1461,7 @@ export class CoreSitesProvider {
         // Parse info and config.
         const site = this.makeSiteFromSiteListEntry(entry);
 
-        await this.migrateSiteSchemas(site);
+        await this.sitesDB.migrateSiteSchemas(site);
 
         // Set site after migrating schemas, or a call to getSite could get the site while tables are being created.
         this.sites[entry.id] = site;
@@ -1230,18 +1475,20 @@ export class CoreSitesProvider {
      * @param entry Site database entry.
      * @returns Site.
      */
-    makeSiteFromSiteListEntry(entry: SiteDBEntry): CoreSite {
-        const info = entry.info ? CoreTextUtils.parseJSON<CoreSiteInfo>(entry.info) : undefined;
-        const config = entry.config ? CoreTextUtils.parseJSON<CoreSiteConfig>(entry.config) : undefined;
+    protected makeSiteFromSiteListEntry(entry: SiteDBEntry): CoreSite {
+        const info = entry.info ? CoreText.parseJSON<CoreSiteInfo>(entry.info) : undefined;
+        const config = entry.config ? CoreText.parseJSON<CoreSiteConfig>(entry.config) : undefined;
 
         const site = CoreSitesFactory.makeSite(
             entry.id,
             entry.siteUrl,
             entry.token,
-            info,
-            entry.privateToken,
-            config,
-            entry.loggedOut == 1,
+            {
+                info,
+                privateToken: entry.privateToken,
+                config,
+                loggedOut: entry.loggedOut === 1,
+            },
         );
         site.setOAuthId(entry.oauthId || undefined);
 
@@ -1259,7 +1506,7 @@ export class CoreSitesProvider {
             return !!this.currentSite;
         }
 
-        const siteId = typeof site == 'object' ? site.getId() : site;
+        const siteId = typeof site === 'object' ? site.getId() : site;
 
         return this.currentSite.getId() === siteId;
     }
@@ -1297,26 +1544,43 @@ export class CoreSitesProvider {
     async getSites(ids?: string[]): Promise<CoreSiteBasicInfo[]> {
         const sites = await this.sitesTable.getMany();
 
+        return this.siteDBRecordsToBasicInfo(sites, ids);
+    }
+
+    /**
+     * Convert sites DB records to site basic info.
+     *
+     * @param sites DB records.
+     * @param ids IDs of sites to return, undefined to return them all.
+     * @returns Sites basic info.
+     */
+    protected async siteDBRecordsToBasicInfo(sites: SiteDBEntry[], ids?: string[]): Promise<CoreSiteBasicInfo[]> {
         const formattedSites: CoreSiteBasicInfo[] = [];
-        sites.forEach((site) => {
+
+        await Promise.all(sites.map(async (site) => {
             if (!ids || ids.indexOf(site.id) > -1) {
-                // Parse info.
-                const siteInfo = site.info ? <CoreSiteInfo> CoreTextUtils.parseJSON(site.info) : undefined;
+                const siteInfo = site.info ? <CoreSiteInfo> CoreText.parseJSON(site.info) : undefined;
+                const siteInstance = CoreSitesFactory.makeSite(site.id, site.siteUrl, site.token, { info: siteInfo });
+
+                const siteName = await siteInstance.getSiteName();
+
                 const basicInfo: CoreSiteBasicInfo = {
                     id: site.id,
+                    userId: siteInfo?.userid,
                     siteUrl: site.siteUrl,
                     siteUrlWithoutProtocol: site.siteUrl.replace(/^https?:\/\//, '').toLowerCase(),
                     fullname: siteInfo?.fullname,
                     firstname: siteInfo?.firstname,
                     lastname: siteInfo?.lastname,
-                    siteName: siteInfo?.sitename,
+                    siteName,
                     userpictureurl: siteInfo?.userpictureurl,
                     siteHomeId: siteInfo?.siteid || 1,
                     loggedOut: !!site.loggedOut,
+                    info: siteInfo,
                 };
                 formattedSites.push(basicInfo);
             }
-        });
+        }));
 
         return formattedSites;
     }
@@ -1333,8 +1597,8 @@ export class CoreSitesProvider {
         // Sort sites by site name, url and then fullname.
         sites.sort((a, b) => {
             // First compare by site name.
-            let textA = CoreTextUtils.cleanTags(a.siteName).toLowerCase().trim();
-            let textB = CoreTextUtils.cleanTags(b.siteName).toLowerCase().trim();
+            let textA = CoreText.cleanTags(a.siteName).toLowerCase().trim();
+            let textB = CoreText.cleanTags(b.siteName).toLowerCase().trim();
 
             let compare = textA.localeCompare(textB);
             if (compare !== 0) {
@@ -1394,21 +1658,33 @@ export class CoreSitesProvider {
      * Login the user in a site.
      *
      * @param siteId ID of the site the user is accessing.
-     * @returns Promise resolved when current site is stored.
      */
     async login(siteId: string): Promise<void> {
         await CoreConfig.set(CORE_SITE_CURRENT_SITE_ID_CONFIG, siteId);
 
-        CoreEvents.trigger(CoreEvents.LOGIN, {}, siteId);
+        CoreEvents.trigger(CoreEvents.LOGIN, { siteId }, siteId);
     }
 
     /**
      * Logout the user.
      *
-     * @param options Logout options.
-     * @returns Promise resolved when the user is logged out.
+     * @param options Options.
      */
     async logout(options: CoreSitesLogoutOptions = {}): Promise<void> {
+        await CoreNavigator.navigate('/logout', {
+            params: { ...options },
+            reset: true,
+        });
+    }
+
+    /**
+     * Logout the user.
+     * This function is for internal usage, please use CoreSites.logout instead. The reason this function is public is because
+     * it's called from the CoreLoginLogoutPage page.
+     *
+     * @param options Logout options.
+     */
+    async internalLogout(options: InternalLogoutOptions = {}): Promise<void> {
         if (!this.currentSite) {
             return;
         }
@@ -1418,14 +1694,16 @@ export class CoreSitesProvider {
         const siteId = this.currentSite.getId();
 
         this.currentSite = undefined;
+        this.isLoginNavigationFinished = false;
+        this.afterLoginNavigationQueue = [];
 
-        if (options.forceLogout || (siteConfig && siteConfig.tool_mobile_forcelogout == '1')) {
+        if (options.forceLogout || (siteConfig && siteConfig.tool_mobile_forcelogout === '1')) {
             promises.push(this.setSiteLoggedOut(siteId));
         }
 
         promises.push(this.removeStoredCurrentSite());
 
-        await CoreUtils.ignoreErrors(Promise.all(promises));
+        await CorePromiseUtils.ignoreErrors(Promise.all(promises));
 
         if (options.removeAccount) {
             await CoreSites.deleteSite(siteId);
@@ -1440,6 +1718,7 @@ export class CoreSitesProvider {
      * @param siteId Site that will be opened after logout.
      * @param redirectData Page/url to open after logout.
      * @returns Promise resolved with boolean: true if app will be reloaded after logout.
+     * @deprecated since 5.0. Use CoreSites.logout instead, it automatically handles redirects.
      */
     async logoutForRedirect(siteId: string, redirectData: CoreRedirectPayload): Promise<boolean> {
         if (!this.currentSite) {
@@ -1448,24 +1727,22 @@ export class CoreSitesProvider {
 
         if (CoreSitePlugins.hasSitePluginsLoaded) {
             // The site has site plugins so the app will be restarted. Store the data and logout.
-            CoreApp.storeRedirect(siteId, redirectData);
+            CoreRedirects.storeRedirect(siteId, redirectData);
         }
 
-        await this.logout();
+        await this.internalLogout();
 
         return CoreSitePlugins.hasSitePluginsLoaded;
     }
 
     /**
      * Restores the session to the previous one so the user doesn't has to login everytime the app is started.
-     *
-     * @returns Promise resolved if a session is restored.
      */
     async restoreSession(): Promise<void> {
         await this.handleAutoLogout();
 
         if (this.sessionRestored) {
-            return Promise.reject(new CoreError('Session already restored.'));
+            throw new CoreError('Session already restored.');
         }
 
         this.sessionRestored = true;
@@ -1484,13 +1761,13 @@ export class CoreSitesProvider {
      * Handle auto logout by checking autologout type and time if its required.
      */
     async handleAutoLogout(): Promise<void> {
-        await CoreUtils.ignoreErrors(( async () => {
+        await CorePromiseUtils.ignoreErrors(( async () => {
             const siteId = await this.getStoredCurrentSiteId();
             const site = await this.getSite(siteId);
             const autoLogoutType = Number(site.getStoredConfig('tool_mobile_autologout'));
             const autoLogoutTime = Number(site.getStoredConfig('tool_mobile_autologouttime'));
 
-            if (autoLogoutType === CoreAutoLogoutType.NEVER || !site.id) {
+            if (!autoLogoutType || autoLogoutType === CoreAutoLogoutType.NEVER || !site.id) {
                 return;
             }
 
@@ -1509,7 +1786,6 @@ export class CoreSitesProvider {
      *
      * @param siteId ID of the site.
      * @param isLoggedOut True if logged out and needs to authenticate again, false otherwise.
-     * @returns Promise resolved when done.
      */
     async setSiteLoggedOut(siteId: string, isLoggedOut: boolean = true): Promise<void> {
         const site = await this.getSite(siteId);
@@ -1520,20 +1796,12 @@ export class CoreSitesProvider {
     }
 
     /**
-     * Unset current site.
-     */
-    unsetCurrentSite(): void {
-        this.currentSite = undefined;
-    }
-
-    /**
      * Updates a site's token.
      *
      * @param siteUrl Site's URL.
      * @param username Username.
      * @param token User's new token.
      * @param privateToken User's private token.
-     * @returns A promise resolved when the site is updated.
      */
     async updateSiteToken(siteUrl: string, username: string, token: string, privateToken: string = ''): Promise<void> {
         const siteId = this.createSiteID(siteUrl, username);
@@ -1549,7 +1817,6 @@ export class CoreSitesProvider {
      * @param siteId Site Id.
      * @param token User's new token.
      * @param privateToken User's private token.
-     * @returns A promise resolved when the site is updated.
      */
     async updateSiteTokenBySiteId(siteId: string, token: string, privateToken: string = ''): Promise<void> {
         const site = await this.getSite(siteId);
@@ -1572,10 +1839,26 @@ export class CoreSitesProvider {
     }
 
     /**
+     * Removes the OAuth ID for a given site.
+     *
+     * @param siteId The ID of the site to update.
+     */
+    async removeSiteOauthId(siteId: string): Promise<void> {
+        const site = await this.getSite(siteId);
+
+        site.setOAuthId(undefined);
+
+        const newData: Partial<SiteDBEntry> = {
+            oauthId: null,
+        };
+
+        await this.sitesTable.update(newData, { id: siteId });
+    }
+
+    /**
      * Updates a site's info.
      *
      * @param siteId Site's ID.
-     * @returns A promise resolved when the site is updated.
      */
     async updateSiteInfo(siteId?: string): Promise<void> {
         const site = await this.getSite(siteId);
@@ -1585,9 +1868,11 @@ export class CoreSitesProvider {
             site.setInfo(info);
 
             const versionCheck = this.isValidMoodleVersion(info);
-            if (versionCheck != CoreSitesProvider.VALID_VERSION) {
+            if (versionCheck !== CoreSitesProvider.VALID_VERSION) {
                 // The Moodle version is not supported, reject.
-                return this.treatInvalidAppVersion(versionCheck, site.getId());
+                await this.treatInvalidAppVersion(versionCheck, site.getId());
+
+                return;
             }
 
             // Try to get the site config.
@@ -1624,12 +1909,11 @@ export class CoreSitesProvider {
      *
      * @param siteUrl Site's URL.
      * @param username Username.
-     * @returns A promise to be resolved when the site is updated.
      */
-    updateSiteInfoByUrl(siteUrl: string, username: string): Promise<void> {
+    async updateSiteInfoByUrl(siteUrl: string, username: string): Promise<void> {
         const siteId = this.createSiteID(siteUrl, username);
 
-        return this.updateSiteInfo(siteId);
+        await this.updateSiteInfo(siteId);
     }
 
     /**
@@ -1653,7 +1937,7 @@ export class CoreSitesProvider {
         // Check if URL has http(s) protocol.
         if (!url.match(/^https?:\/\//i)) {
             // URL doesn't have http(s) protocol. Check if it has any protocol.
-            if (CoreUrlUtils.isAbsoluteURL(url)) {
+            if (CoreUrl.isAbsoluteURL(url)) {
                 // It has some protocol. Return empty array.
                 return [];
             }
@@ -1702,8 +1986,6 @@ export class CoreSitesProvider {
 
     /**
      * Remove current site stored in DB.
-     *
-     * @returns Promise resolved when done.
      */
     async removeStoredCurrentSite(): Promise<void> {
         await CoreConfig.delete(CORE_SITE_CURRENT_SITE_ID_CONFIG);
@@ -1716,7 +1998,7 @@ export class CoreSitesProvider {
      * @returns Promise resolved with the public config.
      */
     getSitePublicConfig(siteUrl: string): Promise<CoreSitePublicConfigResponse> {
-        const temporarySite = CoreSitesFactory.makeSite(undefined, siteUrl);
+        const temporarySite = CoreSitesFactory.makeUnauthenticatedSite(siteUrl);
 
         return temporarySite.getPublicConfig();
     }
@@ -1762,25 +2044,13 @@ export class CoreSitesProvider {
      * should use the registerCoreSiteSchema method instead.
      *
      * @param schema The schema to register.
-     * @returns Promise resolved when done.
      */
     async registerSiteSchema(schema: CoreSiteSchema): Promise<void> {
         if (!this.currentSite) {
             return;
         }
 
-        try {
-            // Site has already been created, apply the schema directly.
-            const schemas: {[name: string]: CoreRegisteredSiteSchema} = {};
-            schemas[schema.name] = schema;
-
-            // Apply it to the specified site only.
-            (schema as CoreRegisteredSiteSchema).siteId = this.currentSite.getId();
-
-            await this.applySiteSchemas(this.currentSite, schemas);
-        } finally {
-            this.pluginsSiteSchemas[schema.name] = schema;
-        }
+        await this.sitesDB.registerSiteSchema(schema, this.currentSite);
     }
 
     /**
@@ -1788,91 +2058,10 @@ export class CoreSitesProvider {
      *
      * @param site Site.
      * @returns Promise resolved when done.
+     * @deprecated since 5.0. This function should not be used anymore outsite CoreSites.
      */
     async migrateSiteSchemas(site: CoreSite): Promise<void> {
-        if (!site.id) {
-            return;
-        }
-
-        const siteId = site.id;
-
-        if (this.siteSchemasMigration[siteId] !== undefined) {
-            return this.siteSchemasMigration[siteId];
-        }
-
-        this.logger.debug(`Migrating all schemas of ${siteId}`);
-
-        // First create tables not registerd with name/version.
-        const promise = site.getDb().createTableFromSchema(SCHEMA_VERSIONS_TABLE_SCHEMA)
-            .then(() => this.applySiteSchemas(site, this.siteSchemas));
-
-        this.siteSchemasMigration[siteId] = promise;
-
-        return promise.finally(() => {
-            delete this.siteSchemasMigration[siteId];
-        });
-    }
-
-    /**
-     * Install and upgrade the supplied schemas for a certain site.
-     *
-     * @param site Site.
-     * @param schemas Schemas to migrate.
-     * @returns Promise resolved when done.
-     */
-    protected async applySiteSchemas(site: CoreSite, schemas: {[name: string]: CoreRegisteredSiteSchema}): Promise<void> {
-        // Fetch installed versions of the schema.
-        const records = await this.getSiteSchemasTable(site).getMany();
-
-        const versions: {[name: string]: number} = {};
-        records.forEach((record) => {
-            versions[record.name] = record.version;
-        });
-
-        const promises: Promise<void>[] = [];
-        for (const name in schemas) {
-            const schema = schemas[name];
-            const oldVersion = versions[name] || 0;
-            if (oldVersion >= schema.version || (schema.siteId && site.getId() != schema.siteId)) {
-                // Version already applied or the schema shouldn't be registered to this site.
-                continue;
-            }
-
-            this.logger.debug(`Migrating schema '${name}' of ${site.id} from version ${oldVersion} to ${schema.version}`);
-
-            promises.push(this.applySiteSchema(site, schema, oldVersion));
-        }
-
-        await Promise.all(promises);
-    }
-
-    /**
-     * Install and upgrade the supplied schema for a certain site.
-     *
-     * @param site Site.
-     * @param schema Schema to migrate.
-     * @param oldVersion Old version of the schema.
-     * @returns Promise resolved when done.
-     */
-    protected async applySiteSchema(site: CoreSite, schema: CoreRegisteredSiteSchema, oldVersion: number): Promise<void> {
-        if (!site.id) {
-            return;
-        }
-
-        const db = site.getDb();
-
-        if (schema.tables) {
-            await db.createTablesFromSchema(schema.tables);
-        }
-        if (schema.install && oldVersion == 0) {
-            await schema.install(db, site.id);
-        }
-        if (schema.migrate && oldVersion > 0) {
-            await schema.migrate(db, oldVersion, site.id);
-        }
-
-        // Set installed version.
-        await this.getSiteSchemasTable(site).insert({ name: schema.name, version: schema.version });
+        return this.sitesDB.migrateSiteSchemas(site);
     }
 
     /**
@@ -1899,11 +2088,13 @@ export class CoreSitesProvider {
         const site = await this.getSite(siteIds[0]);
 
         const siteUrl = CoreText.removeEndingSlash(
-            CoreUrlUtils.removeProtocolAndWWW(site.getURL()),
+            CoreUrl.removeUrlParts(site.getURL(), [CoreUrlPartNames.Protocol, CoreUrlPartNames.WWWInDomain]),
         );
-        const treatedUrl = CoreText.removeEndingSlash(CoreUrlUtils.removeProtocolAndWWW(url));
+        const treatedUrl = CoreText.removeEndingSlash(
+            CoreUrl.removeUrlParts(url, [CoreUrlPartNames.Protocol, CoreUrlPartNames.WWWInDomain]),
+        );
 
-        if (siteUrl == treatedUrl) {
+        if (siteUrl === treatedUrl) {
             result.site = site;
         }
 
@@ -1917,16 +2108,20 @@ export class CoreSitesProvider {
      * @returns Name of the site schemas.
      */
     getSiteTableSchemasToClear(site: CoreSite): string[] {
-        let reset: string[] = [];
-        const schemas = Object.values(this.siteSchemas).concat(Object.values(this.pluginsSiteSchemas));
+        return this.sitesDB.getSiteTableSchemasToClear(site);
+    }
 
-        schemas.forEach((schema) => {
-            if (schema.canBeCleared && (!schema.siteId || site.getId() == schema.siteId)) {
-                reset = reset.concat(schema.canBeCleared);
-            }
-        });
-
-        return reset;
+    /**
+     * Get preSets to filter the text and rewrite URLs.
+     *
+     * @param filter If false, text won't be filtered and URLs won't be rewritten. Any other value means text will be filtered.
+     * @returns PreSets.
+     */
+    getFilterPresets(filter?: boolean): CoreSiteWSPreSets {
+        return {
+            filter: filter !== false,
+            rewriteurls: filter !== false,
+        };
     }
 
     /**
@@ -1998,40 +2193,18 @@ export class CoreSitesProvider {
         }
 
         try {
-            const db = CoreApp.getDB();
+            const db = CoreAppDB.getDB();
 
             const { siteId } = await db.getRecord<{ siteId: string }>('current_site');
 
             await CoreConfig.set(CORE_SITE_CURRENT_SITE_ID_CONFIG, siteId);
-            await CoreApp.deleteTableSchema('current_site');
+            await CoreAppDB.deleteTableSchema('current_site');
             await db.dropTable('current_site');
         } catch {
             // There was no current site, silence the error.
         } finally {
             await CoreConfig.set('current_site_migrated', 1);
         }
-    }
-
-    /**
-     * Get schemas table for the given site.
-     *
-     * @param site Site.
-     * @returns Scehmas Table.
-     */
-    protected getSiteSchemasTable(site: CoreSite): AsyncInstance<CoreDatabaseTable<SchemaVersionsDBEntry, 'name'>> {
-        const siteId = site.getId();
-
-        this.schemasTables[siteId] = this.schemasTables[siteId] ?? asyncInstance(
-            () => this.getSiteTable(SCHEMA_VERSIONS_TABLE_NAME, {
-                siteId: siteId,
-                database: site.getDb(),
-                config: { cachingStrategy: CoreDatabaseCachingStrategy.Eager },
-                primaryKeyColumns: ['name'],
-                onDestroy: () => delete this.schemasTables[siteId],
-            }),
-        );
-
-        return this.schemasTables[siteId];
     }
 
     /**
@@ -2048,7 +2221,7 @@ export class CoreSitesProvider {
             try {
                 await this.storeTokensInSecureStorage(site.id, site.token, site.privateToken);
             } catch {
-                this.logger.error('Error storing tokens in secure storage for site ' + site.id);
+                this.logger.error(`Error storing tokens in secure storage for site ${site.id}`);
             }
         }));
 
@@ -2108,6 +2281,101 @@ export class CoreSitesProvider {
         };
     }
 
+    /**
+     * Invalidate all sites cache.
+     */
+    protected async invalidateCaches(): Promise<void> {
+        const sites = await this.getSites();
+
+        await Promise.all(
+            sites
+                .map(site => CoreSitesFactory.makeSite(site.id, site.siteUrl, ''))
+                .map(site => site.invalidateCaches()),
+        );
+    }
+
+    /**
+     * Run some code when the login navigation is finished. Login navigation finishes when the proper main menu page
+     * has loaded.
+     * If not logged in or the login navigation is already finished, the callback will run immediately (waiting for currently
+     * running processes to finish).
+     * Otherwise, the process will be added to a queue and will run once the login navigation is finished.
+     *
+     * @param data Process data.
+     */
+    runAfterLoginNavigation(data: CoreSitesAfterLoginNavigationProcess): void {
+        if (!this.isLoggedIn() || this.isLoginNavigationFinished) {
+            this.afterLoginNavigationQueueRunner.run(data.callback, { priority: data.priority });
+
+            return;
+        }
+
+        this.afterLoginNavigationQueue.push(data);
+
+        // Sort the list by priority. The queue runner also uses priority, but the first run is always executed immediately
+        // so it's important to always pass the highest priority process first.
+        this.afterLoginNavigationQueue.sort((a, b) => b.priority - a.priority);
+    }
+
+    /**
+     * Notify that the login navigation is finished. This function should only be used by main menu pages.
+     */
+    loginNavigationFinished(): void {
+        if (this.isLoginNavigationFinished) {
+            // Already finished, nothing else to do.
+            return;
+        }
+
+        this.isLoginNavigationFinished = true;
+
+        // Run the processes in the queue.
+        this.afterLoginNavigationQueue.forEach(data => {
+            this.afterLoginNavigationQueueRunner.run(data.callback, { priority: data.priority });
+        });
+        this.afterLoginNavigationQueue = [];
+    }
+
+    /**
+     * Filter the list of site IDs based on a isEnabled function.
+     *
+     * @param siteIds Site IDs to filter.
+     * @param isEnabledFn Function to call for each site. It receives a siteId param and all the params sent to this function
+     *                    after 'checkAll'.
+     * @param checkAll True if it should check all the sites, false if it should check only 1 and treat them all
+     *                 depending on this result.
+     * @returns Promise resolved with the list of enabled sites.
+     */
+    async filterEnabledSites<P extends unknown[]>(
+        siteIds: string[],
+        isEnabledFn: (siteId: string, ...args: P) => boolean | Promise<boolean>,
+        checkAll?: boolean,
+        ...args: P
+    ): Promise<string[]> {
+        const promises: Promise<false | number>[] = [];
+        const enabledSites: string[] = [];
+
+        for (const i in siteIds) {
+            const siteId = siteIds[i];
+            const pushIfEnabled = enabled => enabled && enabledSites.push(siteId);
+            if (checkAll || !promises.length) {
+                promises.push(
+                    Promise
+                        .resolve(isEnabledFn(siteId, ...args))
+                        .then(pushIfEnabled),
+                );
+            }
+        }
+
+        await CorePromiseUtils.allPromisesIgnoringErrors(promises);
+
+        if (!checkAll) {
+            // Checking 1 was enough, so it will either return all the sites or none.
+            return enabledSites.length ? siteIds : [];
+        }
+
+        return enabledSites;
+    }
+
 }
 
 export const CoreSites = makeSingleton(CoreSitesProvider);
@@ -2130,11 +2398,6 @@ export type CoreSiteCheckResponse = {
      * Service used.
      */
     service: string;
-
-    /**
-     * Code of the warning message to show to the user. @deprecated since app 4.0
-     */
-    warning?: string;
 
     /**
      * Site public config (if available).
@@ -2167,6 +2430,7 @@ export type CoreSiteUserTokenResponse = {
  */
 export type CoreSiteBasicInfo = {
     id: string; // Site ID.
+    userId?: number; // User ID.
     siteUrl: string; // Site URL.
     siteUrlWithoutProtocol: string; // Site URL without protocol.
     fullname?: string; // User's full name.
@@ -2177,6 +2441,7 @@ export type CoreSiteBasicInfo = {
     badge?: number; // Badge to display in the site.
     siteHomeId?: number; // Site home ID.
     loggedOut: boolean; // If Site is logged out.
+    info?: CoreSiteInfo; // Site info.
 };
 
 /**
@@ -2194,7 +2459,7 @@ export type CoreSiteSchema = {
     version: number;
 
     /**
-     * Names of the tables of the site schema that can be cleared.
+     * Names of the tables of the site schema that can be cleared when removing downloading data in space usage.
      */
     canBeCleared?: string[];
 
@@ -2270,6 +2535,11 @@ export type CoreLoginSiteInfo = {
      * Class to apply to site item.
      */
     className?: string;
+
+    /**
+     * Whether the site is for demo mode usage.
+     */
+    demoMode?: boolean;
 };
 
 /**
@@ -2302,6 +2572,13 @@ export type CoreSitesCommonWSOptions = {
 };
 
 /**
+ * Common options used when calling a WS through CoreSite, including an option to determine if text should be filtered.
+ */
+export type CoreSitesWSOptionsWithFilter = CoreSitesCommonWSOptions & {
+    filter?: boolean; // Defaults to true. If false, text won't be filtered and URLs won't be rewritten.
+};
+
+/**
  * Data about a certain demo site.
  */
 export type CoreSitesDemoSiteData = {
@@ -2326,7 +2603,22 @@ export type CoreSitesLoginTokenResponse = {
 /**
  * Options for logout.
  */
-export type CoreSitesLogoutOptions = {
+export type CoreSitesLogoutOptions = CoreRedirectPayload & InternalLogoutOptions & {
+    siteId?: string; // Site ID to load after logout.
+};
+
+/**
+ * Options for internal logout.
+ */
+type InternalLogoutOptions = {
     forceLogout?: boolean; // If true, site will be marked as logged out, no matter the value tool_mobile_forcelogout.
     removeAccount?: boolean; // If true, site will be removed too after logout.
+};
+
+/**
+ * Process to run after login navigation finishes.
+ */
+export type CoreSitesAfterLoginNavigationProcess = {
+    priority: number;
+    callback: () => Promise<void>;
 };

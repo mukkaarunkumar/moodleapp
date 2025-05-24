@@ -14,17 +14,18 @@
 
 import { Injectable } from '@angular/core';
 import { CoreError } from '@classes/errors/error';
-import { CoreSiteWSPreSets } from '@classes/site';
+import { CoreSiteWSPreSets } from '@classes/sites/authenticated-site';
 import { CoreSites } from '@services/sites';
 import { CoreWSExternalWarning } from '@services/ws';
 import { makeSingleton } from '@singletons';
 
-const ROOT_CACHE_KEY = 'mmaReportBuilder:';
 export const REPORTS_LIST_LIMIT = 20;
 export const REPORT_ROWS_LIMIT = 20;
 
 @Injectable({ providedIn: 'root' })
 export class CoreReportBuilderService {
+
+    protected static readonly ROOT_CACHE_KEY = 'mmaReportBuilder:';
 
     /**
      * Obtain the reports list.
@@ -148,7 +149,7 @@ export class CoreReportBuilderService {
      * @returns Cache key.
      */
     protected getReportBuilderCacheKey(): string {
-        return ROOT_CACHE_KEY + 'list';
+        return `${CoreReportBuilderService.ROOT_CACHE_KEY}list`;
     }
 
     /**
@@ -157,7 +158,7 @@ export class CoreReportBuilderService {
      * @returns Cache key.
      */
     protected getReportBuilderReportCacheKey(): string {
-        return ROOT_CACHE_KEY + 'report';
+        return `${CoreReportBuilderService.ROOT_CACHE_KEY}report`;
     }
 
     isString(value: unknown): boolean {
@@ -264,4 +265,4 @@ export type CoreReportBuilderReportDetailSettingsData = {
     cardviewVisibleColumns: number;
 };
 
-export interface CoreReportBuilderReport extends CoreReportBuilderReportWSResponse {};
+export interface CoreReportBuilderReport extends CoreReportBuilderReportWSResponse {}

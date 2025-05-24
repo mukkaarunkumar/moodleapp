@@ -15,20 +15,17 @@
 import { Injectable } from '@angular/core';
 import { CoreError } from '@classes/errors/error';
 import { CoreFileUploader, CoreFileUploaderStoreFilesResult } from '@features/fileuploader/services/fileuploader';
-import { FileEntry } from '@ionic-native/file/ngx';
+import { FileEntry } from '@awesome-cordova-plugins/file/ngx';
 import { CoreFile } from '@services/file';
-import { CoreFileEntry } from '@services/file-helper';
+import { CoreFileEntry, CoreFileHelper } from '@services/file-helper';
 import { CoreSites } from '@services/sites';
-import { CoreTextUtils, CoreTextFormat } from '@services/utils/text';
-import { CoreUtils } from '@services/utils/utils';
+import { CoreText, DEFAULT_TEXT_FORMAT } from '@singletons/text';
+import { CoreUtils } from '@singletons/utils';
 import { makeSingleton, Translate } from '@singletons';
 import { CoreFormFields } from '@singletons/form';
 import { AddonModWorkshopAssessmentStrategyFieldErrors } from '../components/assessment-strategy/assessment-strategy';
 import { AddonWorkshopAssessmentStrategyDelegate } from './assessment-strategy-delegate';
 import {
-    AddonModWorkshopExampleMode,
-    AddonModWorkshopPhase,
-    AddonModWorkshopUserOptions,
     AddonModWorkshopData,
     AddonModWorkshop,
     AddonModWorkshopSubmissionData,
@@ -36,12 +33,20 @@ import {
     AddonModWorkshopPhaseTaskData,
     AddonModWorkshopSubmissionAssessmentData,
     AddonModWorkshopGetAssessmentFormDefinitionData,
-    AddonModWorkshopAction,
-    AddonModWorkshopOverallFeedbackMode,
     AddonModWorkshopGetAssessmentFormFieldsParsedData,
+    AddonModWorkshopGetAssessmentsOptions,
+    AddonModWorkshopGetSubmissionsOptions,
 } from './workshop';
 import { AddonModWorkshopOffline, AddonModWorkshopOfflineSubmission } from './workshop-offline';
-import { ADDON_MOD_WORKSHOP_COMPONENT } from '@addons/mod/workshop/constants';
+import {
+    ADDON_MOD_WORKSHOP_COMPONENT,
+    AddonModWorkshopAction,
+    AddonModWorkshopExampleMode,
+    AddonModWorkshopOverallFeedbackMode,
+    AddonModWorkshopPhase,
+} from '@addons/mod/workshop/constants';
+import { CorePromiseUtils } from '@singletons/promise-utils';
+import { CoreObject } from '@singletons/object';
 
 /**
  * Helper to gather some common functions for workshop.
@@ -117,6 +122,33 @@ export class AddonModWorkshopHelperProvider {
     }
 
     /**
+     * Check whether the current user can add feedback to submissions and assessments.
+     * User must have permissions (usually a teacher) and the workshop needs to be in grading evaluation phase.
+     *
+     * @param workshop Workshop.
+     * @param access Access info.
+     * @returns Whether the current user can add feedback to submissions.
+     */
+    canAddFeedback(workshop: AddonModWorkshopData, access: AddonModWorkshopGetWorkshopAccessInformationWSResponse): boolean {
+        return workshop.phase === AddonModWorkshopPhase.PHASE_EVALUATION && access.canoverridegrades;
+    }
+
+    /**
+     * Check whether the user can add/edit assessments.
+     * For some reason, the canAssess function only checks the "examples" part but not the phases or 'assessingallowed'.
+     * To avoid breaking existing logic, this new function was created which checks everything. The canAssess function should
+     * probably be renamed to something which indicates better its purpose.
+     *
+     * @param workshop Workshop.
+     * @param access Access info.
+     * @returns Whether the user can edit assessments.
+     */
+    canEditAssessments(workshop: AddonModWorkshopData, access: AddonModWorkshopGetWorkshopAccessInformationWSResponse): boolean {
+        return workshop.phase === AddonModWorkshopPhase.PHASE_ASSESSMENT && this.canAssess(workshop, access) &&
+            access.assessingallowed && access.canpeerassess;
+    }
+
+    /**
      * Return a particular user submission from the submission list.
      *
      * @param workshopId Workshop ID.
@@ -125,7 +157,7 @@ export class AddonModWorkshopHelperProvider {
      */
     async getUserSubmission(
         workshopId: number,
-        options: AddonModWorkshopUserOptions = {},
+        options: AddonModWorkshopGetSubmissionsOptions = {},
     ): Promise<AddonModWorkshopSubmissionData | undefined> {
         const userId = options.userId || CoreSites.getCurrentSiteUserId();
 
@@ -145,7 +177,7 @@ export class AddonModWorkshopHelperProvider {
     async getSubmissionById(
         workshopId: number,
         submissionId: number,
-        options: AddonModWorkshopUserOptions = {},
+        options: AddonModWorkshopGetSubmissionsOptions = {},
     ): Promise<AddonModWorkshopSubmissionData> {
         try {
             return await AddonModWorkshop.getSubmission(workshopId, submissionId, options);
@@ -173,7 +205,7 @@ export class AddonModWorkshopHelperProvider {
     async getReviewerAssessmentById(
         workshopId: number,
         assessmentId: number,
-        options: AddonModWorkshopUserOptions = {},
+        options: AddonModWorkshopGetAssessmentsOptions = {},
     ): Promise<AddonModWorkshopSubmissionAssessmentWithFormData> {
         let assessment: AddonModWorkshopSubmissionAssessmentWithFormData | undefined;
 
@@ -188,7 +220,10 @@ export class AddonModWorkshopHelperProvider {
             }
         }
 
-        assessment.form = await AddonModWorkshop.getAssessmentForm(workshopId, assessmentId, options);
+        assessment.form = await AddonModWorkshop.getAssessmentForm(workshopId, assessmentId, {
+            cmId: options.cmId,
+            siteId: options.siteId,
+        });
 
         return assessment;
     }
@@ -202,7 +237,7 @@ export class AddonModWorkshopHelperProvider {
      */
     async getReviewerAssessments(
         workshopId: number,
-        options: AddonModWorkshopUserOptions = {},
+        options: AddonModWorkshopGetAssessmentsOptions = {},
     ): Promise<AddonModWorkshopSubmissionAssessmentWithFormData[]> {
         options.siteId = options.siteId || CoreSites.getCurrentSiteId();
 
@@ -211,12 +246,13 @@ export class AddonModWorkshopHelperProvider {
 
         const promises: Promise<void>[] = [];
         assessments.forEach((assessment) => {
-            promises.push(this.getSubmissionById(workshopId, assessment.submissionid, options).then((submission) => {
+            const newOptions = CoreObject.without(options, ['canAssess', 'filter']);
+            promises.push(this.getSubmissionById(workshopId, assessment.submissionid, newOptions).then((submission) => {
                 assessment.submission = submission;
 
                 return;
             }));
-            promises.push(AddonModWorkshop.getAssessmentForm(workshopId, assessment.id, options).then((assessmentForm) => {
+            promises.push(AddonModWorkshop.getAssessmentForm(workshopId, assessment.id, newOptions).then((assessmentForm) => {
                 assessment.form = assessmentForm;
 
                 return;
@@ -238,8 +274,8 @@ export class AddonModWorkshopHelperProvider {
     async deleteSubmissionStoredFiles(workshopId: number, siteId?: string): Promise<void> {
         const folderPath = await AddonModWorkshopOffline.getSubmissionFolder(workshopId, siteId);
 
-        // Ignore any errors, CoreFileProvider.removeDir fails if folder doesn't exists.
-        await CoreUtils.ignoreErrors(CoreFile.removeDir(folderPath));
+        // Ignore any errors, CoreFile.removeDir fails if folder doesn't exists.
+        await CorePromiseUtils.ignoreErrors(CoreFile.removeDir(folderPath));
     }
 
     /**
@@ -310,7 +346,7 @@ export class AddonModWorkshopHelperProvider {
         const folderPath = await AddonModWorkshopOffline.getSubmissionFolder(workshopId, siteId);
 
         // Ignore not found files.
-        return CoreUtils.ignoreErrors(CoreFileUploader.getStoredFiles(folderPath), []);
+        return CorePromiseUtils.ignoreErrors(CoreFileUploader.getStoredFiles(folderPath), []);
     }
 
     /**
@@ -342,8 +378,8 @@ export class AddonModWorkshopHelperProvider {
     async deleteAssessmentStoredFiles(workshopId: number, assessmentId: number, siteId?: string): Promise<void> {
         const folderPath = await AddonModWorkshopOffline.getAssessmentFolder(workshopId, assessmentId, siteId);
 
-        // Ignore any errors, CoreFileProvider.removeDir fails if folder doesn't exists.
-        await CoreUtils.ignoreErrors(CoreFile.removeDir(folderPath));
+        // Ignore any errors, CoreFile.removeDir fails if folder doesn't exists.
+        await CorePromiseUtils.ignoreErrors(CoreFile.removeDir(folderPath));
     }
 
     /**
@@ -391,7 +427,7 @@ export class AddonModWorkshopHelperProvider {
         files: CoreFileEntry[],
         offline: false,
         siteId?: string,
-    ): Promise<number>
+    ): Promise<number>;
     uploadOrStoreAssessmentFiles(
         workshopId: number,
         assessmentId: number,
@@ -418,7 +454,7 @@ export class AddonModWorkshopHelperProvider {
         const folderPath = await AddonModWorkshopOffline.getAssessmentFolder(workshopId, assessmentId, siteId);
 
         // Ignore not found files.
-        return CoreUtils.ignoreErrors(CoreFileUploader.getStoredFiles(folderPath), []);
+        return CorePromiseUtils.ignoreErrors(CoreFileUploader.getStoredFiles(folderPath), []);
     }
 
     /**
@@ -449,7 +485,14 @@ export class AddonModWorkshopHelperProvider {
      * @returns Promise resolved with the files.
      */
     async applyOfflineData(
-        submission: AddonModWorkshopSubmissionDataWithOfflineData = {
+        submission?: AddonModWorkshopSubmissionDataWithOfflineData,
+        actions: AddonModWorkshopOfflineSubmission[] = [],
+    ): Promise<AddonModWorkshopSubmissionDataWithOfflineData | undefined> {
+        if (actions.length === 0) {
+            return submission;
+        }
+
+        const baseSubmission = submission ?? {
             id: 0,
             workshopid: 0,
             title: '',
@@ -462,12 +505,7 @@ export class AddonModWorkshopHelperProvider {
             attachment: 0,
             published: false,
             late: 0,
-        },
-        actions: AddonModWorkshopOfflineSubmission[] = [],
-    ): Promise<AddonModWorkshopSubmissionDataWithOfflineData | undefined> {
-        if (actions.length === 0) {
-            return submission;
-        }
+        };
 
         let attachmentsId: CoreFileUploaderStoreFilesResult | undefined;
         const workshopId = actions[0].workshopid;
@@ -476,17 +514,20 @@ export class AddonModWorkshopHelperProvider {
             switch (action.action) {
                 case AddonModWorkshopAction.ADD:
                 case AddonModWorkshopAction.UPDATE:
-                    submission.title = action.title;
-                    submission.content = action.content;
-                    submission.title = action.title;
-                    submission.courseid = action.courseid;
-                    submission.submissionmodified = action.timemodified / 1000;
-                    submission.offline = true;
+                    baseSubmission.title = action.title;
+                    // Offline data can contain images with PLUGINFILE, replace them so they can be seen.
+                    baseSubmission.content = CoreFileHelper.replacePluginfileUrls(
+                        action.content,
+                        submission?.contentfiles || [],
+                    );
+                    baseSubmission.courseid = action.courseid;
+                    baseSubmission.submissionmodified = action.timemodified / 1000;
+                    baseSubmission.offline = true;
                     attachmentsId = action.attachmentsid as CoreFileUploaderStoreFilesResult;
                     break;
                 case AddonModWorkshopAction.DELETE:
-                    submission.deleted = true;
-                    submission.submissionmodified = action.timemodified / 1000;
+                    baseSubmission.deleted = true;
+                    baseSubmission.submissionmodified = action.timemodified / 1000;
                     break;
                 default:
             }
@@ -494,13 +535,13 @@ export class AddonModWorkshopHelperProvider {
 
         // Check offline files for latest attachmentsid.
         if (attachmentsId) {
-            submission.attachmentfiles =
+            baseSubmission.attachmentfiles =
                 await this.getSubmissionFilesFromOfflineFilesObject(attachmentsId, workshopId);
         } else {
-            submission.attachmentfiles = [];
+            baseSubmission.attachmentfiles = [];
         }
 
-        return submission;
+        return baseSubmission;
     }
 
     /**
@@ -531,7 +572,7 @@ export class AddonModWorkshopHelperProvider {
             (await AddonWorkshopAssessmentStrategyDelegate.prepareAssessmentData(workshop.strategy ?? '', selectedValues, form)) ||
             {};
         data.feedbackauthor = feedbackText;
-        data.feedbackauthorformat = CoreTextFormat.FORMAT_HTML;
+        data.feedbackauthorformat = DEFAULT_TEXT_FORMAT;
         data.feedbackauthorattachmentsid = attachmentsId;
         data.nodims = form.dimenssionscount;
 
@@ -560,7 +601,7 @@ export class AddonModWorkshopHelperProvider {
             return '0';
         }
 
-        value = CoreTextUtils.roundToDecimals(max * value / 100, decimals);
+        value = CoreText.roundToDecimals(max * value / 100, decimals);
 
         return CoreUtils.formatFloat(value);
     }

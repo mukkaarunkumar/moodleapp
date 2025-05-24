@@ -13,23 +13,24 @@
 // limitations under the License.
 
 import { APP_INITIALIZER, NgModule } from '@angular/core';
-import { CoreAppProvider } from '@services/app';
-import moment from 'moment-timezone';
 import { TestingBehatRuntime, TestingBehatRuntimeService } from './services/behat-runtime';
+import { CorePlatform } from '@services/platform';
 
 type AutomatedTestsWindow = Window & {
     behat?: TestingBehatRuntimeService;
 };
 
-function initializeAutomatedTests(window: AutomatedTestsWindow) {
-    if (!CoreAppProvider.isAutomated()) {
+/**
+ * Initialize automated tests.
+ *
+ * @param window Window.
+ */
+async function initializeAutomatedTests(window: AutomatedTestsWindow) {
+    if (!CorePlatform.isAutomated()) {
         return;
     }
 
     window.behat = TestingBehatRuntime.instance;
-
-    // Force timezone for automated tests.
-    moment.tz.setDefault(CoreAppProvider.getForcedTimezone());
 }
 
 @NgModule({
@@ -37,8 +38,8 @@ function initializeAutomatedTests(window: AutomatedTestsWindow) {
         {
             provide: APP_INITIALIZER,
             multi: true,
-            useValue: () => {
-                initializeAutomatedTests(window);
+            useValue: async () => {
+                await initializeAutomatedTests(window);
             },
         },
     ],

@@ -1,4 +1,4 @@
-@mod @mod_workshop @app @javascript
+@addon_mod_workshop @app @mod @mod_workshop @javascript
 Feature: Test basic usage of workshop activity in app
 
   Background:
@@ -49,13 +49,14 @@ Feature: Test basic usage of workshop activity in app
     Given I entered the workshop activity "workshop" on course "Course 1" as "student1" in the app
     Then I should find "Task to do" within "Submit your work" "ion-item" in the app
 
-    When I press "Edit submission" in the app
+    When I press "Add submission" in the app
     And I set the field "Title" to "The Answer" in the app
     And I set the field "Submission content" to "42" in the app
     And I press "Save" in the app
     Then I should find "Task done" within "Submit your work" "ion-item" in the app
     And I should find "The Answer" in the app
     And I should find "42" in the app
+    And I should find "Edit submission" in the app
 
     Given I entered the workshop activity "workshop" on course "Course 1" as "teacher1" in the app
     When I pull to refresh in the app
@@ -82,7 +83,7 @@ Feature: Test basic usage of workshop activity in app
     Then I should find "Task to do" within "Assess peers" "ion-item" in the app
 
     When I press "The Answer" in the app
-    And I press "Grade for Aspect 01" in the app
+    And I press "Grade for Aspect 1" in the app
     And I press "10 / 10" in the app
     And I press "Save" in the app
     Then I should find "Assessed submission" in the app
@@ -113,3 +114,26 @@ Feature: Test basic usage of workshop activity in app
     And I pull to refresh in the app
     Then I should find "Closed" in the app
     And I should find "Conclusion 1" in the app
+    And the following events should have been logged for "student1" in the app:
+      | name                                     | activity | activityname  | course   |
+      | \mod_workshop\event\course_module_viewed | workshop | Test workshop | Course 1 |
+      | \mod_workshop\event\submission_created   | workshop | Test workshop | Course 1 |
+      | \mod_workshop\event\submission_updated   | workshop | Test workshop | Course 1 |
+      | \mod_workshop\event\assessable_uploaded  | workshop | Test workshop | Course 1 |
+    And the following events should have been logged for "student2" in the app:
+      | name                                     | activity | activityname  | relateduser | course   |
+      | \mod_workshop\event\course_module_viewed | workshop | Test workshop |             | Course 1 |
+      | \mod_workshop\event\submission_viewed    | workshop | Test workshop | student1    | Course 1 |
+      | \mod_workshop\event\submission_assessed  | workshop | Test workshop | student1    | Course 1 |
+    And the following events should have been logged for "teacher1" in the app:
+      | name                                     | activity | activityname  | course   |
+      | \mod_workshop\event\course_module_viewed | workshop | Test workshop | Course 1 |
+
+  Scenario: Prefetch a workshop
+    Given I entered the course "Course 1" as "teacher1" in the app
+    And I press "workshop" in the app
+    When I press "Information" in the app
+    And I press "Download" in the app
+    And I press "Close" in the app
+    And I go back in the app
+    Then I should find "Downloaded" in the app

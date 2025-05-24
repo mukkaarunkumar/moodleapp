@@ -14,27 +14,37 @@
 
 import { Injectable } from '@angular/core';
 import { Subject, Subscription } from 'rxjs';
-import { ILocalNotification } from '@ionic-native/local-notifications';
+import { ILocalNotification } from '@awesome-cordova-plugins/local-notifications';
 
-import { CoreApp } from '@services/app';
+import { CoreAppDB } from '@services/app-db';
 import { CoreConfig } from '@services/config';
 import { CoreEventObserver, CoreEvents } from '@singletons/events';
-import { CoreTextUtils } from '@services/utils/text';
-import { SQLiteDB } from '@classes/sqlitedb';
+import { CoreText } from '@singletons/text';
 import { CoreQueueRunner } from '@classes/queue-runner';
 import { CoreError } from '@classes/errors/error';
 import { CoreConstants } from '@/core/constants';
-import { makeSingleton, NgZone, Translate, LocalNotifications, Push } from '@singletons';
+import { makeSingleton, NgZone, Translate, LocalNotifications, ApplicationInit } from '@singletons';
 import { CoreLogger } from '@singletons/logger';
 import {
     APP_SCHEMA,
     TRIGGERED_TABLE_NAME,
     COMPONENTS_TABLE_NAME,
-    SITES_TABLE_NAME,
+    LOCAL_NOTIFICATIONS_SITES_TABLE_NAME,
     CodeRequestsQueueItem,
+    CoreLocalNotificationsTriggeredDBRecord,
+    CoreLocalNotificationsComponentsDBRecord,
+    CoreLocalNotificationsSitesDBRecord,
 } from '@services/database/local-notifications';
 import { CorePromisedValue } from '@classes/promised-value';
 import { CorePlatform } from '@services/platform';
+import { Push } from '@features/native/plugins';
+import { AsyncInstance, asyncInstance } from '@/core/utils/async-instance';
+import { CoreDatabaseTable } from '@classes/database/database-table';
+import { CoreDatabaseCachingStrategy, CoreDatabaseTableProxy } from '@classes/database/database-table-proxy';
+import { CoreSites } from './sites';
+import { CoreNavigator } from './navigator';
+import { CoreWait } from '@singletons/wait';
+import { CoreAlerts } from './overlays/alerts';
 
 /**
  * Service to handle local notifications.
@@ -55,12 +65,11 @@ export class CoreLocalNotificationsProvider {
     protected updateSubscription?: Subscription;
     protected queueRunner: CoreQueueRunner; // Queue to decrease the number of concurrent calls to the plugin (see MOBILE-3477).
 
-    // Variables for DB.
-    protected appDB: Promise<SQLiteDB>;
-    protected resolveAppDB!: (appDB: SQLiteDB) => void;
+    protected sitesTable = asyncInstance<CoreDatabaseTable<CoreLocalNotificationsSitesDBRecord, 'id', never>>();
+    protected componentsTable = asyncInstance<CoreDatabaseTable<CoreLocalNotificationsComponentsDBRecord, 'id', never>>();
+    protected triggeredTable = asyncInstance<CoreDatabaseTable<CoreLocalNotificationsTriggeredDBRecord>>();
 
     constructor() {
-        this.appDB = new Promise(resolve => this.resolveAppDB = resolve);
         this.logger = CoreLogger.getInstance('CoreLocalNotificationsProvider');
         this.queueRunner = new CoreQueueRunner(10);
     }
@@ -81,7 +90,28 @@ export class CoreLocalNotificationsProvider {
             this.handleEvent('trigger', notification);
         });
 
-        this.clickSubscription = LocalNotifications.on('click').subscribe((notification: ILocalNotification) => {
+        this.clickSubscription = LocalNotifications.on('click').subscribe(async (notification: ILocalNotification) => {
+            await ApplicationInit.donePromise;
+
+            // This code is also done when clicking push notifications. If it's modified, it should be modified in there too.
+            if (CoreSites.isLoggedIn()) {
+                CoreSites.runAfterLoginNavigation({
+                    priority: 0, // Use a low priority because the execution of this process doesn't block the next ones.
+                    callback: async () => {
+                        this.handleEvent('click', notification);
+                    },
+                });
+
+                return;
+            }
+
+            // User not logged in, wait for the path to be a "valid" path (not a parent path used when starting the app).
+            await CoreWait.waitFor(() => {
+                const currentPath = CoreNavigator.getCurrentPath();
+
+                return currentPath !== '/' && currentPath !== '/login';
+            }, { timeout: 400 });
+
             this.handleEvent('click', notification);
         });
 
@@ -114,19 +144,113 @@ export class CoreLocalNotificationsProvider {
                 this.cancelSiteNotifications(site.id);
             }
         });
+
+        CoreEvents.on(CoreEvents.LOGIN, async () => {
+            const [hasNotificationsPermission, canScheduleExact] = await Promise.all([
+                this.hasNotificationsPermission(),
+                this.canScheduleExactAlarms(),
+            ]);
+
+            if (!hasNotificationsPermission || canScheduleExact) {
+                return;
+            }
+
+            const dontShowWarning = await CoreConfig.get(CoreConstants.EXACT_ALARMS_WARNING_DISPLAYED, 0);
+            if (dontShowWarning) {
+                return;
+            }
+
+            CoreAlerts.show({
+                header: Translate.instant('core.turnonexactalarms'),
+                message: Translate.instant('core.exactalarmsturnedoffmessage'),
+                buttons: [
+                    {
+                        text: Translate.instant('core.notnow'),
+                        role: 'cancel',
+                    },
+                    {
+                        text: Translate.instant('core.turnon'),
+                        handler: (): void => {
+                            this.openAlarmSettings();
+                        },
+                    },
+                ],
+            });
+
+            CoreConfig.set(CoreConstants.EXACT_ALARMS_WARNING_DISPLAYED, 1);
+        });
     }
 
     /**
      * Initialize database.
      */
     async initializeDatabase(): Promise<void> {
-        try {
-            await CoreApp.createTablesFromSchema(APP_SCHEMA);
-        } catch {
-            // Ignore errors.
+        await CoreAppDB.createTablesFromSchema(APP_SCHEMA);
+
+        const database = CoreAppDB.getDB();
+        const sitesTable = new CoreDatabaseTableProxy<CoreLocalNotificationsSitesDBRecord, 'id', never>(
+            { cachingStrategy: CoreDatabaseCachingStrategy.None },
+            database,
+            LOCAL_NOTIFICATIONS_SITES_TABLE_NAME,
+            ['id'],
+            null,
+        );
+        const componentsTable = new CoreDatabaseTableProxy<CoreLocalNotificationsComponentsDBRecord, 'id', never>(
+            { cachingStrategy: CoreDatabaseCachingStrategy.None },
+            database,
+            COMPONENTS_TABLE_NAME,
+            ['id'],
+            null,
+        );
+        const triggeredTable = new CoreDatabaseTableProxy<CoreLocalNotificationsTriggeredDBRecord>(
+            { cachingStrategy: CoreDatabaseCachingStrategy.None },
+            database,
+            TRIGGERED_TABLE_NAME,
+        );
+
+        await Promise.all([
+            sitesTable.initialize(),
+            componentsTable.initialize(),
+            triggeredTable.initialize(),
+        ]);
+
+        this.sitesTable.setInstance(sitesTable);
+        this.componentsTable.setInstance(componentsTable);
+        this.triggeredTable.setInstance(triggeredTable);
+    }
+
+    /**
+     * Check whether the app has the permission to display notifications.
+     *
+     * @returns Whether has notifications permission.
+     */
+    async hasNotificationsPermission(): Promise<boolean> {
+        if (!CorePlatform.isMobile()) {
+            return true;
         }
 
-        this.resolveAppDB(CoreApp.getDB());
+        return LocalNotifications.hasPermission();
+    }
+
+    /**
+     * Check whether the app can schedule exact alarms.
+     *
+     * @returns Whether can schedule exact alarms.
+     */
+    async canScheduleExactAlarms(): Promise<boolean> {
+        if (!CorePlatform.isAndroid()) {
+            return true;
+        }
+
+        const plugin = this.getCordovaPlugin();
+        if (!plugin || !plugin.canScheduleExactAlarms) {
+            // Cannot check, assume it's enabled.
+            return true;
+        }
+
+        return new Promise(resolve => {
+            plugin.canScheduleExactAlarms(canSchedule => resolve(canSchedule));
+        });
     }
 
     /**
@@ -140,7 +264,7 @@ export class CoreLocalNotificationsProvider {
     async cancel(id: number, component: string, siteId: string): Promise<void> {
         const uniqueId = await this.getUniqueNotificationId(id, component, siteId);
 
-        const queueId = 'cancel-' + uniqueId;
+        const queueId = `cancel-${uniqueId}`;
 
         await this.queueRunner.run(queueId, () => LocalNotifications.cancel(uniqueId), {
             allowRepeated: true,
@@ -154,21 +278,19 @@ export class CoreLocalNotificationsProvider {
      * @returns Promise resolved when the notifications are cancelled.
      */
     async cancelSiteNotifications(siteId: string): Promise<void> {
-        if (!this.isAvailable()) {
-            return;
-        } else if (!siteId) {
+        if (!siteId) {
             throw new Error('No site ID supplied.');
         }
 
         const scheduled = await this.getAllScheduled();
 
         const ids: number[] = [];
-        const queueId = 'cancelSiteNotifications-' + siteId;
+        const queueId = `cancelSiteNotifications-${siteId}`;
 
         scheduled.forEach((notif) => {
             notif.data = this.parseNotificationData(notif.data);
 
-            if (notif.id && typeof notif.data == 'object' && notif.data.siteId === siteId) {
+            if (notif.id && typeof notif.data === 'object' && notif.data.siteId === siteId) {
                 ids.push(notif.id);
             }
         });
@@ -213,7 +335,12 @@ export class CoreLocalNotificationsProvider {
      * @returns Promise resolved with the notifications.
      */
     protected getAllScheduled(): Promise<ILocalNotification[]> {
-        return this.queueRunner.run('allScheduled', () => LocalNotifications.getAllScheduled());
+        return this.queueRunner.run('allScheduled', () => new Promise((resolve) => {
+            // LocalNotifications.getAllScheduled is broken, use the Cordova plugin directly.
+            const plugin = this.getCordovaPlugin();
+
+            plugin ? plugin.getScheduled(notifications => resolve(notifications)) : resolve([]);
+        }));
     }
 
     /**
@@ -223,33 +350,38 @@ export class CoreLocalNotificationsProvider {
      * @param id ID of the element to get its code.
      * @returns Promise resolved when the code is retrieved.
      */
-    protected async getCode(table: string, id: string): Promise<number> {
-        const key = table + '#' + id;
+    protected async getCode(
+        table: AsyncInstance<CoreDatabaseTable<{ id: string; code: number }>>,
+        id: string,
+    ): Promise<number> {
+        const key = `${table}#${id}`;
 
         // Check if the code is already in memory.
         if (this.codes[key] !== undefined) {
             return this.codes[key];
         }
 
-        const db = await this.appDB;
-
         try {
             // Check if we already have a code stored for that ID.
-            const entry = await db.getRecord<{id: string; code: number}>(table, { id: id });
+            const entry = await table.getOneByPrimaryKey({ id: id });
 
             this.codes[key] = entry.code;
 
             return entry.code;
         } catch (err) {
             // No code stored for that ID. Create a new code for it.
-            const entries = await db.getRecords<{id: string; code: number}>(table, undefined, 'code DESC');
+            const entries = await table.getMany(undefined, {
+                sorting: [
+                    { code: 'desc' },
+                ],
+            });
 
             let newCode = 0;
             if (entries.length > 0) {
                 newCode = entries[0].code + 1;
             }
 
-            await db.insertRecord(table, { id: id, code: newCode });
+            await table.insert({ id: id, code: newCode });
             this.codes[key] = newCode;
 
             return newCode;
@@ -275,7 +407,7 @@ export class CoreLocalNotificationsProvider {
      * @returns Promise resolved when the site code is retrieved.
      */
     protected getSiteCode(siteId: string): Promise<number> {
-        return this.requestCode(SITES_TABLE_NAME, siteId);
+        return this.requestCode(LOCAL_NOTIFICATIONS_SITES_TABLE_NAME, siteId);
     }
 
     /**
@@ -311,20 +443,10 @@ export class CoreLocalNotificationsProvider {
      */
     protected handleEvent(eventName: string, notification: ILocalNotification): void {
         if (notification && notification.data) {
-            this.logger.debug('Notification event: ' + eventName + '. Data:', notification.data);
+            this.logger.debug(`Notification event: ${eventName}. Data:`, notification.data);
 
             this.notifyEvent(eventName, notification.data);
         }
-    }
-
-    /**
-     * Returns whether local notifications are available.
-     *
-     * @returns Whether local notifications are available.
-     * @deprecated since 4.1. It will always return true.
-     */
-    isAvailable(): boolean {
-        return true;
     }
 
     /**
@@ -333,11 +455,18 @@ export class CoreLocalNotificationsProvider {
      * @returns Whether local notifications plugin is available.
      */
     isPluginAvailable(): boolean {
-        const win = <any> window; // eslint-disable-line @typescript-eslint/no-explicit-any
+        return !!this.getCordovaPlugin() && CorePlatform.isMobile();
+    }
 
-        const enabled = !!win.cordova?.plugins?.notification?.local;
-
-        return enabled && CorePlatform.is('cordova');
+    /**
+     * Get the Cordova plugin object.
+     *
+     * @returns Cordova plugin, undefined if not found.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    protected getCordovaPlugin(): any | undefined {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (<any> window).cordova?.plugins?.notification?.local;
     }
 
     /**
@@ -348,13 +477,12 @@ export class CoreLocalNotificationsProvider {
      * @returns Promise resolved with a boolean indicating if promise is triggered (true) or not.
      */
     async isTriggered(notification: ILocalNotification, useQueue: boolean = true): Promise<boolean> {
-        const db = await this.appDB;
+        if (notification.id === undefined) {
+            return false;
+        }
 
         try {
-            const stored = await db.getRecord<{ id: number; at: number }>(
-                TRIGGERED_TABLE_NAME,
-                { id: notification.id },
-            );
+            const stored = await this.triggeredTable.getOneByPrimaryKey({ id: notification.id });
 
             let triggered = (notification.trigger && notification.trigger.at) || 0;
 
@@ -366,7 +494,7 @@ export class CoreLocalNotificationsProvider {
         } catch {
             const notificationId = notification.id || 0;
             if (useQueue) {
-                const queueId = 'isTriggered-' + notificationId;
+                const queueId = `isTriggered-${notificationId}`;
 
                 return this.queueRunner.run(queueId, () => LocalNotifications.isTriggered(notificationId), {
                     allowRepeated: true,
@@ -414,7 +542,7 @@ export class CoreLocalNotificationsProvider {
         if (!data) {
             return {};
         } else if (typeof data == 'string') {
-            return CoreTextUtils.parseJSON(data, {});
+            return CoreText.parseJSON(data, {});
         } else {
             return data;
         }
@@ -435,12 +563,23 @@ export class CoreLocalNotificationsProvider {
 
         try {
             // Check if request is valid.
-            if (typeof request != 'object' || request.table === undefined || request.id === undefined) {
+            if (typeof request !== 'object' || request.table === undefined || request.id === undefined) {
                 return;
             }
 
             // Get the code and resolve/reject all the promises of this request.
-            const code = await this.getCode(request.table, request.id);
+            const getCodeFromTable = async () => {
+                switch (request.table) {
+                    case LOCAL_NOTIFICATIONS_SITES_TABLE_NAME:
+                        return this.getCode(this.sitesTable, request.id);
+                    case COMPONENTS_TABLE_NAME:
+                        return this.getCode(this.componentsTable, request.id);
+                    default:
+                        throw new Error(`Unknown local-notifications table: ${request.table}`);
+                }
+            };
+
+            const code = await getCodeFromTable();
 
             request.deferreds.forEach((p) => {
                 p.resolve(code);
@@ -507,9 +646,7 @@ export class CoreLocalNotificationsProvider {
      * @returns Promise resolved when it is removed.
      */
     async removeTriggered(id: number): Promise<void> {
-        const db = await this.appDB;
-
-        await db.deleteRecords(TRIGGERED_TABLE_NAME, { id: id });
+        await this.triggeredTable.deleteByPrimaryKey({ id });
     }
 
     /**
@@ -519,9 +656,12 @@ export class CoreLocalNotificationsProvider {
      * @param id ID of the element to get its code.
      * @returns Promise resolved when the code is retrieved.
      */
-    protected requestCode(table: string, id: string): Promise<number> {
+    protected requestCode(
+        table: typeof LOCAL_NOTIFICATIONS_SITES_TABLE_NAME | typeof COMPONENTS_TABLE_NAME,
+        id: string,
+    ): Promise<number> {
         const deferred = new CorePromisedValue<number>();
-        const key = table + '#' + id;
+        const key = `${table}#${id}`;
         const isQueueEmpty = Object.keys(this.codeRequestsQueue).length == 0;
 
         if (this.codeRequestsQueue[key] !== undefined) {
@@ -530,8 +670,8 @@ export class CoreLocalNotificationsProvider {
         } else {
             // Add a pending request to the queue.
             this.codeRequestsQueue[key] = {
-                table: table,
-                id: id,
+                table,
+                id,
                 deferreds: [deferred],
             };
         }
@@ -556,7 +696,7 @@ export class CoreLocalNotificationsProvider {
             // Convert some properties to the needed types.
             notification.data = this.parseNotificationData(notification.data);
 
-            const queueId = 'schedule-' + notification.id;
+            const queueId = `schedule-${notification.id}`;
 
             await this.queueRunner.run(queueId, () => this.scheduleNotification(notification), {
                 allowRepeated: true,
@@ -613,7 +753,7 @@ export class CoreLocalNotificationsProvider {
             }
         }
 
-        const queueId = 'schedule-' + notification.id;
+        const queueId = `schedule-${notification.id}`;
 
         await this.queueRunner.run(queueId, () => this.scheduleNotification(notification), {
             allowRepeated: true,
@@ -665,7 +805,6 @@ export class CoreLocalNotificationsProvider {
      * @returns Promise resolved when stored, rejected otherwise.
      */
     async trigger(notification: ILocalNotification): Promise<number> {
-        const db = await this.appDB;
         let time = Date.now();
         if (notification.trigger?.at) {
             // The type says "at" is a Date, but in Android we can receive timestamps instead.
@@ -676,12 +815,10 @@ export class CoreLocalNotificationsProvider {
             }
         }
 
-        const entry = {
+        return this.triggeredTable.insert({
             id: notification.id,
             at: time,
-        };
-
-        return db.insertRecord(TRIGGERED_TABLE_NAME, entry);
+        });
     }
 
     /**
@@ -692,12 +829,32 @@ export class CoreLocalNotificationsProvider {
      * @returns Promise resolved when done.
      */
     async updateComponentName(oldName: string, newName: string): Promise<void> {
-        const db = await this.appDB;
+        const oldId = `${COMPONENTS_TABLE_NAME}#${oldName}`;
+        const newId = `${COMPONENTS_TABLE_NAME}#${newName}`;
 
-        const oldId = COMPONENTS_TABLE_NAME + '#' + oldName;
-        const newId = COMPONENTS_TABLE_NAME + '#' + newName;
+        await this.componentsTable.update({ id: newId }, { id: oldId });
+    }
 
-        await db.updateRecords(COMPONENTS_TABLE_NAME, { id: newId }, { id: oldId });
+    /**
+     * Open notification settings.
+     */
+    openNotificationSettings(): void {
+        if (!CorePlatform.isMobile()) {
+            return;
+        }
+
+        this.getCordovaPlugin()?.openNotificationSettings();
+    }
+
+    /**
+     * Open alarm settings (Android only).
+     */
+    openAlarmSettings(): void {
+        if (!CorePlatform.isAndroid()) {
+            return;
+        }
+
+        this.getCordovaPlugin()?.openAlarmSettings();
     }
 
 }

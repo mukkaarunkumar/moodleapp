@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { CoreSites } from '@services/sites';
-import { CoreTextUtils } from '@services/utils/text';
+import { CoreText } from '@singletons/text';
 import { CoreH5P } from '@features/h5p/services/h5p';
 import {
     CoreH5PCore,
@@ -24,6 +24,7 @@ import {
     CoreH5PContentDepsTreeDependency,
     CoreH5PLibraryBasicData,
     CoreH5PLibraryBasicDataWithPatch,
+    CoreH5PMissingLibrary,
 } from './core';
 import {
     CONTENT_TABLE_NAME,
@@ -36,6 +37,10 @@ import {
     CoreH5PLibraryDBRecord,
     CoreH5PLibraryDependencyDBRecord,
     CoreH5PContentsLibraryDBRecord,
+    CoreH5PMissingDependencyDBRecord,
+    MISSING_DEPENDENCIES_TABLE_NAME,
+    MISSING_DEPENDENCIES_PRIMARY_KEYS,
+    CoreH5PMissingDependencyDBPrimaryKeys,
 } from '../services/database/h5p';
 import { CoreError } from '@classes/errors/error';
 import { CoreH5PSemantics } from './content-validator';
@@ -43,12 +48,130 @@ import { CoreH5PContentBeingSaved, CoreH5PLibraryBeingSaved } from './storage';
 import { CoreH5PLibraryAddTo, CoreH5PLibraryMetadataSettings } from './validator';
 import { CoreH5PMetadata } from './metadata';
 import { Translate } from '@singletons';
-import { SQLiteDB } from '@classes/sqlitedb';
+import { AsyncInstance, asyncInstance } from '@/core/utils/async-instance';
+import { LazyMap, lazyMap } from '@/core/utils/lazy-map';
+import { CoreDatabaseTable } from '@classes/database/database-table';
+import { CoreDatabaseCachingStrategy } from '@classes/database/database-table-proxy';
+import { SubPartial } from '@/core/utils/types';
+import { CoreH5PMissingDependenciesError } from './errors/missing-dependencies-error';
+import { CoreFilepool } from '@services/filepool';
+import { CoreFileHelper } from '@services/file-helper';
+import { CoreUrl, CoreUrlPartNames } from '@singletons/url';
+import { CorePromiseUtils } from '@singletons/promise-utils';
 
 /**
  * Equivalent to Moodle's implementation of H5PFrameworkInterface.
  */
 export class CoreH5PFramework {
+
+    protected contentTables: LazyMap<AsyncInstance<CoreDatabaseTable<CoreH5PContentDBRecord>>>;
+    protected librariesTables: LazyMap<AsyncInstance<CoreDatabaseTable<CoreH5PLibraryDBRecord>>>;
+    protected libraryDependenciesTables: LazyMap<AsyncInstance<CoreDatabaseTable<CoreH5PLibraryDependencyDBRecord>>>;
+    protected contentsLibrariesTables: LazyMap<AsyncInstance<CoreDatabaseTable<CoreH5PContentsLibraryDBRecord>>>;
+    protected librariesCachedAssetsTables: LazyMap<AsyncInstance<CoreDatabaseTable<CoreH5PLibraryCachedAssetsDBRecord>>>;
+    protected missingDependenciesTables: LazyMap<
+        AsyncInstance<CoreDatabaseTable<CoreH5PMissingDependencyDBRecord, CoreH5PMissingDependencyDBPrimaryKeys>>
+    >;
+
+    constructor() {
+        this.contentTables = lazyMap(
+            siteId => asyncInstance(
+                () => CoreSites.getSiteTable(
+                    CONTENT_TABLE_NAME,
+                    {
+                        siteId,
+                        config: { cachingStrategy: CoreDatabaseCachingStrategy.None },
+                        onDestroy: () => delete this.contentTables[siteId],
+                    },
+                ),
+            ),
+        );
+        this.librariesTables = lazyMap(
+            siteId => asyncInstance(
+                () => CoreSites.getSiteTable(
+                    LIBRARIES_TABLE_NAME,
+                    {
+                        siteId,
+                        config: { cachingStrategy: CoreDatabaseCachingStrategy.None },
+                        onDestroy: () => delete this.librariesTables[siteId],
+                    },
+                ),
+            ),
+        );
+        this.libraryDependenciesTables = lazyMap(
+            siteId => asyncInstance(
+                () => CoreSites.getSiteTable(
+                    LIBRARY_DEPENDENCIES_TABLE_NAME,
+                    {
+                        siteId,
+                        config: { cachingStrategy: CoreDatabaseCachingStrategy.None },
+                        onDestroy: () => delete this.libraryDependenciesTables[siteId],
+                    },
+                ),
+            ),
+        );
+        this.contentsLibrariesTables = lazyMap(
+            siteId => asyncInstance(
+                () => CoreSites.getSiteTable(
+                    CONTENTS_LIBRARIES_TABLE_NAME,
+                    {
+                        siteId,
+                        config: { cachingStrategy: CoreDatabaseCachingStrategy.None },
+                        onDestroy: () => delete this.contentsLibrariesTables[siteId],
+                    },
+                ),
+            ),
+        );
+        this.librariesCachedAssetsTables = lazyMap(
+            siteId => asyncInstance(
+                () => CoreSites.getSiteTable(
+                    LIBRARIES_CACHEDASSETS_TABLE_NAME,
+                    {
+                        siteId,
+                        config: { cachingStrategy: CoreDatabaseCachingStrategy.None },
+                        onDestroy: () => delete this.librariesCachedAssetsTables[siteId],
+                    },
+                ),
+            ),
+        );
+        this.missingDependenciesTables = lazyMap(
+            siteId => asyncInstance(
+                () => CoreSites.getSiteTable(
+                    MISSING_DEPENDENCIES_TABLE_NAME,
+                    {
+                        siteId,
+                        config: { cachingStrategy: CoreDatabaseCachingStrategy.None },
+                        onDestroy: () => delete this.missingDependenciesTables[siteId],
+                        primaryKeyColumns: [...MISSING_DEPENDENCIES_PRIMARY_KEYS],
+                    },
+                ),
+            ),
+        );
+    }
+
+    /**
+     * Given a list of missing dependencies DB records, create a missing dependencies error.
+     *
+     * @param missingDependencies List of missing dependencies.
+     * @returns Error instance.
+     */
+    buildMissingDependenciesErrorFromDBRecords(
+        missingDependencies: CoreH5PMissingDependencyDBRecord[],
+    ): CoreH5PMissingDependenciesError {
+        const missingLibraries = missingDependencies.map(dep => ({
+            machineName: dep.machinename,
+            majorVersion: dep.majorversion,
+            minorVersion: dep.minorversion,
+            libString: dep.requiredby,
+        }));
+
+        const errorMessage = Translate.instant('core.h5p.missingdependency', { $a: {
+            lib: missingLibraries[0].libString,
+            dep: CoreH5PCore.libraryToString(missingLibraries[0]),
+        } });
+
+        return new CoreH5PMissingDependenciesError(errorMessage, missingLibraries);
+    }
 
     /**
      * Will clear filtered params for all the content that uses the specified libraries.
@@ -63,12 +186,16 @@ export class CoreH5PFramework {
             return;
         }
 
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        const whereAndParams = SQLiteDB.getInOrEqual(libraryIds);
-        whereAndParams.sql = 'mainlibraryid ' + whereAndParams.sql;
-
-        await db.updateRecordsWhere(CONTENT_TABLE_NAME, { filtered: null }, whereAndParams.sql, whereAndParams.params);
+        await this.contentTables[siteId].updateWhere(
+            { filtered: null },
+            {
+                sql: `mainlibraryid IN (${libraryIds.map(() => '?').join(', ')})`,
+                sqlParams: libraryIds,
+                js: record => libraryIds.includes(record.mainlibraryid),
+            },
+        );
     }
 
     /**
@@ -79,20 +206,19 @@ export class CoreH5PFramework {
      * @returns Promise resolved with the removed entries.
      */
     async deleteCachedAssets(libraryId: number, siteId?: string): Promise<CoreH5PLibraryCachedAssetsDBRecord[]> {
-
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
         // Get all the hashes that use this library.
-        const entries = await db.getRecords<CoreH5PLibraryCachedAssetsDBRecord>(
-            LIBRARIES_CACHEDASSETS_TABLE_NAME,
-            { libraryid: libraryId },
-        );
-
+        const entries = await this.librariesCachedAssetsTables[siteId].getMany({ libraryid: libraryId });
         const hashes = entries.map((entry) => entry.hash);
 
         if (hashes.length) {
             // Delete the entries from DB.
-            await db.deleteRecordsList(LIBRARIES_CACHEDASSETS_TABLE_NAME, 'hash', hashes);
+            await this.librariesCachedAssetsTables[siteId].deleteWhere({
+                sql: hashes.length === 1 ? 'hash = ?' : `hash IN (${hashes.map(() => '?').join(', ')})`,
+                sqlParams: hashes,
+                js: (record) => hashes.includes(record.hash),
+            });
         }
 
         return entries;
@@ -106,8 +232,7 @@ export class CoreH5PFramework {
      * @returns Promise resolved when done.
      */
     async deleteContentData(id: number, siteId?: string): Promise<void> {
-
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
         // The user content should be reset (instead of removed), because this method is called when H5P content needs
         // to be updated too (and the previous states must be kept, but reset).
@@ -115,7 +240,7 @@ export class CoreH5PFramework {
 
         await Promise.all([
             // Delete the content data.
-            db.deleteRecords(CONTENT_TABLE_NAME, { id }),
+            this.contentTables[siteId].deleteByPrimaryKey({ id }),
 
             // Remove content library dependencies.
             this.deleteLibraryUsage(id, siteId),
@@ -130,9 +255,9 @@ export class CoreH5PFramework {
      * @returns Promise resolved when done.
      */
     async deleteLibrary(id: number, siteId?: string): Promise<void> {
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        await db.deleteRecords(LIBRARIES_TABLE_NAME, { id });
+        await this.librariesTables[siteId].deleteByPrimaryKey({ id });
     }
 
     /**
@@ -143,9 +268,9 @@ export class CoreH5PFramework {
      * @returns Promise resolved when done.
      */
     async deleteLibraryDependencies(libraryId: number, siteId?: string): Promise<void> {
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        await db.deleteRecords(LIBRARY_DEPENDENCIES_TABLE_NAME, { libraryid: libraryId });
+        await this.libraryDependenciesTables[siteId].delete({ libraryid: libraryId });
     }
 
     /**
@@ -156,9 +281,36 @@ export class CoreH5PFramework {
      * @returns Promise resolved when done.
      */
     async deleteLibraryUsage(id: number, siteId?: string): Promise<void> {
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        await db.deleteRecords(CONTENTS_LIBRARIES_TABLE_NAME, { h5pid: id });
+        await this.contentsLibrariesTables[siteId].delete({ h5pid: id });
+    }
+
+    /**
+     * Delete missing dependencies stored for a certain component and componentId.
+     *
+     * @param component Component.
+     * @param componentId Component ID.
+     * @param siteId Site ID.
+     */
+    async deleteMissingDependenciesForComponent(component: string, componentId: string | number, siteId?: string): Promise<void> {
+        siteId ??= CoreSites.getCurrentSiteId();
+
+        await this.missingDependenciesTables[siteId].delete({ component, componentId });
+    }
+
+    /**
+     * Delete all the missing dependencies related to a certain library version.
+     *
+     * @param libraryData Library.
+     * @param siteId Site ID.
+     */
+    protected async deleteMissingDependenciesForLibrary(libraryData: CoreH5PLibraryBasicData, siteId: string): Promise<void> {
+        await this.missingDependenciesTables[siteId].delete({
+            machinename: libraryData.machineName,
+            majorversion: libraryData.majorVersion,
+            minorversion: libraryData.minorVersion,
+        });
     }
 
     /**
@@ -168,9 +320,9 @@ export class CoreH5PFramework {
      * @returns Promise resolved with the list of content data.
      */
     async getAllContentData(siteId?: string): Promise<CoreH5PContentDBRecord[]> {
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        return db.getAllRecords<CoreH5PContentDBRecord>(CONTENT_TABLE_NAME);
+        return this.contentTables[siteId].getMany();
     }
 
     /**
@@ -181,9 +333,9 @@ export class CoreH5PFramework {
      * @returns Promise resolved with the content data.
      */
     async getContentData(id: number, siteId?: string): Promise<CoreH5PContentDBRecord> {
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        return db.getRecord<CoreH5PContentDBRecord>(CONTENT_TABLE_NAME, { id });
+        return this.contentTables[siteId].getOneByPrimaryKey({ id });
     }
 
     /**
@@ -194,19 +346,49 @@ export class CoreH5PFramework {
      * @returns Promise resolved with the content data.
      */
     async getContentDataByUrl(fileUrl: string, siteId?: string): Promise<CoreH5PContentDBRecord> {
-        const site = await CoreSites.getSite(siteId);
-
-        const db = site.getDb();
+        siteId ??= CoreSites.getCurrentSiteId();
 
         // Try to use the folder name, it should be more reliable than the URL.
-        const folderName = await CoreH5P.h5pCore.h5pFS.getContentFolderNameByUrl(fileUrl, site.getId());
+        const folderName = await CoreH5P.h5pCore.h5pFS.getContentFolderNameByUrl(fileUrl, siteId);
 
         try {
-            return await db.getRecord<CoreH5PContentDBRecord>(CONTENT_TABLE_NAME, { foldername: folderName });
+            return await this.contentTables[siteId].getOne({ foldername: folderName });
         } catch (error) {
             // Cannot get folder name, the h5p file was probably deleted. Just use the URL.
-            return db.getRecord<CoreH5PContentDBRecord>(CONTENT_TABLE_NAME, { fileurl: fileUrl });
+            return await this.contentTables[siteId].getOne({ fileurl: fileUrl });
         }
+    }
+
+    /**
+     * Get an identifier for a file URL, used to store missing dependencies.
+     *
+     * @param fileUrl File URL.
+     * @param siteId Site ID. If not defined, current site.
+     * @returns An identifier for the file.
+     */
+    async getFileIdForMissingDependencies(fileUrl: string, siteId?: string): Promise<string> {
+        siteId ??= CoreSites.getCurrentSiteId();
+
+        const isTrusted = await CoreH5P.isTrustedUrl(fileUrl, siteId);
+        if (!isTrusted) {
+            // Fix the URL, we need to URL of the trusted package.
+            const file = await CoreFilepool.fixPluginfileURL(siteId, fileUrl);
+
+            fileUrl = CoreFileHelper.getFileUrl(file);
+        }
+
+        // Remove all params from the URL except the time modified. We don't want the id to depend on changing params like
+        // the language or the token.
+        const urlParams = CoreUrl.extractUrlParams(fileUrl);
+        fileUrl = CoreUrl.addParamsToUrl(
+            CoreUrl.removeUrlParts(fileUrl, [CoreUrlPartNames.Query]),
+            { modified: urlParams.modified },
+        );
+
+        // Only return the file args, that way the id doesn't depend on the endpoint to obtain the file.
+        const fileArgs = CoreUrl.getPluginFileArgs(fileUrl);
+
+        return fileArgs ? fileArgs.join('/') : fileUrl;
     }
 
     /**
@@ -216,17 +398,19 @@ export class CoreH5PFramework {
      * @returns Promise resolved with the latest library version data.
      */
     async getLatestLibraryVersion(machineName: string, siteId?: string): Promise<CoreH5PLibraryParsedDBRecord> {
-
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
         try {
-            const records = await db.getRecords<CoreH5PLibraryDBRecord>(
-                LIBRARIES_TABLE_NAME,
+            const records = await this.librariesTables[siteId].getMany(
                 { machinename: machineName },
-                'majorversion DESC, minorversion DESC, patchversion DESC',
-                '*',
-                0,
-                1,
+                {
+                    limit: 1,
+                    sorting: [
+                        { majorversion: 'desc' },
+                        { minorversion: 'desc' },
+                        { patchversion: 'desc' },
+                    ],
+                },
             );
 
             if (records && records[0]) {
@@ -254,13 +438,12 @@ export class CoreH5PFramework {
         minorVersion?: string | number,
         siteId?: string,
     ): Promise<CoreH5PLibraryParsedDBRecord> {
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        const db = await CoreSites.getSiteDb(siteId);
-
-        const libraries = await db.getRecords<CoreH5PLibraryDBRecord>(LIBRARIES_TABLE_NAME, {
+        const libraries = await this.librariesTables[siteId].getMany({
             machinename: machineName,
-            majorversion: majorVersion,
-            minorversion: minorVersion,
+            majorversion: majorVersion !== undefined ? Number(majorVersion) : undefined,
+            minorversion: minorVersion !== undefined ? Number(minorVersion) : undefined,
         });
 
         if (!libraries.length) {
@@ -289,9 +472,9 @@ export class CoreH5PFramework {
      * @returns Promise resolved with the library data, rejected if not found.
      */
     async getLibraryById(id: number, siteId?: string): Promise<CoreH5PLibraryParsedDBRecord> {
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        const library = await db.getRecord<CoreH5PLibraryDBRecord>(LIBRARIES_TABLE_NAME, { id });
+        const library = await this.librariesTables[siteId].getOneByPrimaryKey({ id });
 
         return this.parseLibDBData(library);
     }
@@ -329,6 +512,47 @@ export class CoreH5PFramework {
      */
     getLibraryIdByData(libraryData: CoreH5PLibraryBasicData, siteId?: string): Promise<number | undefined> {
         return this.getLibraryId(libraryData.machineName, libraryData.majorVersion, libraryData.minorVersion, siteId);
+    }
+
+    /**
+     * Get missing dependencies stored for a certain component and componentId.
+     *
+     * @param component Component.
+     * @param componentId Component ID.
+     * @param siteId Site ID.
+     * @returns List of missing dependencies. Empty list if no missing dependencies stored for the file.
+     */
+    async getMissingDependenciesForComponent(
+        component: string,
+        componentId: string | number,
+        siteId?: string,
+    ): Promise<CoreH5PMissingDependencyDBRecord[]> {
+        siteId ??= CoreSites.getCurrentSiteId();
+
+        try {
+            return await this.missingDependenciesTables[siteId].getMany({ component, componentId });
+        } catch {
+            return [];
+        }
+    }
+
+    /**
+     * Get missing dependencies stored for a certain file.
+     *
+     * @param fileUrl File URL.
+     * @param siteId Site ID.
+     * @returns List of missing dependencies. Empty list if no missing dependencies stored for the file.
+     */
+    async getMissingDependenciesForFile(fileUrl: string, siteId?: string): Promise<CoreH5PMissingDependencyDBRecord[]> {
+        siteId ??= CoreSites.getCurrentSiteId();
+
+        try {
+            const fileId = await this.getFileIdForMissingDependencies(fileUrl, siteId);
+
+            return await this.missingDependenciesTables[siteId].getMany({ fileid: fileId });
+        } catch {
+            return [];
+        }
     }
 
     /**
@@ -424,8 +648,8 @@ export class CoreH5PFramework {
                         'l1.majorversion AS majorVersion, l1.minorversion AS minorVersion, ' +
                         'l1.patchversion AS patchVersion, l1.addto AS addTo, ' +
                         'l1.preloadedjs AS preloadedJs, l1.preloadedcss AS preloadedCss ' +
-                    'FROM ' + LIBRARIES_TABLE_NAME + ' l1 ' +
-                    'LEFT JOIN ' + LIBRARIES_TABLE_NAME + ' l2 ON l1.machinename = l2.machinename AND (' +
+                    `FROM ${LIBRARIES_TABLE_NAME} l1 ` +
+                    `LEFT JOIN ${LIBRARIES_TABLE_NAME} l2 ON l1.machinename = l2.machinename AND (` +
                         'l1.majorversion < l2.majorversion OR (l1.majorversion = l2.majorversion AND ' +
                         'l1.minorversion < l2.minorversion)) ' +
                     'WHERE l1.addto IS NOT NULL AND l2.machinename IS NULL';
@@ -473,7 +697,7 @@ export class CoreH5PFramework {
             disable: null,
             folderName: contentData.foldername,
             title: libData.title,
-            slug: CoreH5PCore.slugify(libData.title) + '-' + contentData.id,
+            slug: `${CoreH5PCore.slugify(libData.title)}-${contentData.id}`,
             filtered: contentData.filtered,
             libraryId: libData.id,
             libraryName: libData.machinename,
@@ -485,7 +709,7 @@ export class CoreH5PFramework {
         };
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const params = CoreTextUtils.parseJSON<any>(contentData.jsoncontent);
+        const params = CoreText.parseJSON<any>(contentData.jsoncontent);
         if (!params.metadata) {
             params.metadata = {};
         }
@@ -514,14 +738,19 @@ export class CoreH5PFramework {
 
         const db = await CoreSites.getSiteDb(siteId);
 
-        let query = 'SELECT hl.id AS libraryId, hl.machinename AS machineName, ' +
-                        'hl.majorversion AS majorVersion, hl.minorversion AS minorVersion, ' +
-                        'hl.patchversion AS patchVersion, hl.preloadedcss AS preloadedCss, ' +
-                        'hl.preloadedjs AS preloadedJs, hcl.dropcss AS dropCss, ' +
-                        'hcl.dependencytype as dependencyType ' +
-                    'FROM ' + CONTENTS_LIBRARIES_TABLE_NAME + ' hcl ' +
-                    'JOIN ' + LIBRARIES_TABLE_NAME + ' hl ON hcl.libraryid = hl.id ' +
-                    'WHERE hcl.h5pid = ?';
+        let query = `SELECT
+            hl.id AS libraryId,
+            hl.machinename AS machineName,
+            hl.majorversion AS majorVersion,
+            hl.minorversion AS minorVersion,
+            hl.patchversion AS patchVersion,
+            hl.preloadedcss AS preloadedCss,
+            hl.preloadedjs AS preloadedJs,
+            hcl.dropcss AS dropCss,
+            hcl.dependencytype as dependencyType
+        FROM ${CONTENTS_LIBRARIES_TABLE_NAME} hcl
+        JOIN ${LIBRARIES_TABLE_NAME} hl ON hcl.libraryid = hl.id
+        WHERE hcl.h5pid = ?`;
 
         const queryArgs: (string | number)[] = [];
         queryArgs.push(id);
@@ -585,11 +814,16 @@ export class CoreH5PFramework {
         };
 
         // Now get the dependencies.
-        const sql = 'SELECT hl.id, hl.machinename, hl.majorversion, hl.minorversion, hll.dependencytype ' +
-                'FROM ' + LIBRARY_DEPENDENCIES_TABLE_NAME + ' hll ' +
-                'JOIN ' + LIBRARIES_TABLE_NAME + ' hl ON hll.requiredlibraryid = hl.id ' +
-                'WHERE hll.libraryid = ? ' +
-                'ORDER BY hl.id ASC';
+        const sql = `SELECT
+            hl.id,
+            hl.machinename,
+            hl.majorversion,
+            hl.minorversion,
+            hll.dependencytype
+        FROM ${LIBRARY_DEPENDENCIES_TABLE_NAME} hll
+        JOIN ${LIBRARIES_TABLE_NAME} hl ON hll.requiredlibraryid = hl.id
+        WHERE hll.libraryid = ?
+        ORDER BY hl.id ASC`;
 
         const sqlParams = [
             library.id,
@@ -601,7 +835,7 @@ export class CoreH5PFramework {
 
         for (let i = 0; i < result.rows.length; i++) {
             const dependency: LibraryDependency = result.rows.item(i);
-            const key = dependency.dependencytype + 'Dependencies';
+            const key = `${dependency.dependencytype}Dependencies`;
 
             libraryData[key].push({
                 machineName: dependency.machinename,
@@ -621,7 +855,7 @@ export class CoreH5PFramework {
      */
     parseLibAddonData(library: LibraryAddonDBData): CoreH5PLibraryAddonData {
         const parsedLib = <CoreH5PLibraryAddonData> library;
-        parsedLib.addTo = CoreTextUtils.parseJSON<CoreH5PLibraryAddTo | null>(library.addTo, null);
+        parsedLib.addTo = CoreText.parseJSON<CoreH5PLibraryAddTo | null>(library.addTo, null);
 
         return parsedLib;
     }
@@ -634,9 +868,9 @@ export class CoreH5PFramework {
      */
     protected parseLibDBData(library: CoreH5PLibraryDBRecord): CoreH5PLibraryParsedDBRecord {
         return Object.assign(library, {
-            semantics: library.semantics ? CoreTextUtils.parseJSON(library.semantics, null) : null,
-            addto: library.addto ? CoreTextUtils.parseJSON(library.addto, null) : null,
-            metadatasettings: library.metadatasettings ? CoreTextUtils.parseJSON(library.metadatasettings, null) : null,
+            semantics: library.semantics ? CoreText.parseJSON(library.semantics, null) : null,
+            addto: library.addto ? CoreText.parseJSON(library.addto, null) : null,
+            metadatasettings: library.metadatasettings ? CoreText.parseJSON(library.metadatasettings, null) : null,
         });
     }
 
@@ -669,17 +903,14 @@ export class CoreH5PFramework {
         folderName: string,
         siteId?: string,
     ): Promise<void> {
-
-        const db = await CoreSites.getSiteDb(siteId);
+        const targetSiteId = siteId ?? CoreSites.getCurrentSiteId();
 
         await Promise.all(Object.keys(dependencies).map(async (key) => {
-            const data: Partial<CoreH5PLibraryCachedAssetsDBRecord> = {
-                hash: key,
+            await this.librariesCachedAssetsTables[targetSiteId].insert({
+                hash,
                 libraryid: dependencies[key].libraryId,
                 foldername: folderName,
-            };
-
-            await db.insertRecord(LIBRARIES_CACHEDASSETS_TABLE_NAME, data);
+            });
         }));
     }
 
@@ -691,6 +922,8 @@ export class CoreH5PFramework {
      * @returns Promise resolved when done.
      */
     async saveLibraryData(libraryData: CoreH5PLibraryBeingSaved, siteId?: string): Promise<void> {
+        siteId ??= CoreSites.getCurrentSiteId();
+
         // Some special properties needs some checking and converting before they can be saved.
         const preloadedJS = this.libraryParameterValuesToCsv(libraryData, 'preloadedJs', 'path');
         const preloadedCSS = this.libraryParameterValuesToCsv(libraryData, 'preloadedCss', 'path');
@@ -708,10 +941,7 @@ export class CoreH5PFramework {
             embedTypes = libraryData.embedTypes.join(', ');
         }
 
-        const site = await CoreSites.getSite(siteId);
-
-        const db = site.getDb();
-        const data: Partial<CoreH5PLibraryDBRecord> = {
+        const data: SubPartial<CoreH5PLibraryDBRecord, 'id'> = {
             title: libraryData.title,
             machinename: libraryData.machineName,
             majorversion: libraryData.majorVersion,
@@ -733,17 +963,18 @@ export class CoreH5PFramework {
             data.id = libraryData.libraryId;
         }
 
-        await db.insertRecord(LIBRARIES_TABLE_NAME, data);
+        const libraryId = await this.librariesTables[siteId].insert(data);
 
         if (!data.id) {
             // New library. Get its ID.
-            const entry = await db.getRecord<CoreH5PLibraryDBRecord>(LIBRARIES_TABLE_NAME, data);
-
-            libraryData.libraryId = entry.id;
+            libraryData.libraryId = libraryId;
         } else {
             // Updated libary. Remove old dependencies.
-            await this.deleteLibraryDependencies(data.id, site.getId());
+            await this.deleteLibraryDependencies(data.id, siteId);
         }
+
+        // Delete missing dependencies related to this library. Don't block the execution for this.
+        CorePromiseUtils.ignoreErrors(this.deleteMissingDependenciesForLibrary(libraryData, siteId));
     }
 
     /**
@@ -761,8 +992,8 @@ export class CoreH5PFramework {
         dependencyType: string,
         siteId?: string,
     ): Promise<void> {
-
-        const db = await CoreSites.getSiteDb(siteId);
+        const targetSiteId = siteId ?? CoreSites.getCurrentSiteId();
+        const libString = CoreH5PCore.libraryToString(library);
 
         await Promise.all(dependencies.map(async (dependency) => {
             // Get the ID of the library.
@@ -770,20 +1001,22 @@ export class CoreH5PFramework {
 
             if (!dependencyId) {
                 // Missing dependency. It should have been detected before installing the package.
-                throw new CoreError(Translate.instant('core.h5p.missingdependency', { $a: {
+                throw new CoreH5PMissingDependenciesError(Translate.instant('core.h5p.missingdependency', { $a: {
                     lib: CoreH5PCore.libraryToString(library),
                     dep: CoreH5PCore.libraryToString(dependency),
-                } }));
+                } }), [{ ...dependency, libString }]);
             }
 
             // Create the relation.
-            const entry: Partial<CoreH5PLibraryDependencyDBRecord> = {
+            if (typeof library.libraryId !== 'number') {
+                throw new CoreError('Attempted to create dependencies of library without id');
+            }
+
+            await this.libraryDependenciesTables[targetSiteId].insert({
                 libraryid: library.libraryId,
                 requiredlibraryid: dependencyId,
                 dependencytype: dependencyType,
-            };
-
-            await db.insertRecord(LIBRARY_DEPENDENCIES_TABLE_NAME, entry);
+            });
         }));
     }
 
@@ -800,8 +1033,7 @@ export class CoreH5PFramework {
         librariesInUse: {[key: string]: CoreH5PContentDepsTreeDependency},
         siteId?: string,
     ): Promise<void> {
-
-        const db = await CoreSites.getSiteDb(siteId);
+        const targetSiteId = siteId ?? CoreSites.getCurrentSiteId();
 
         // Calculate the CSS to drop.
         const dropLibraryCssList: Record<string, string> = {};
@@ -818,19 +1050,46 @@ export class CoreH5PFramework {
             }
         }
 
-        // Now save the uusage.
+        // Now save the usage.
         await Promise.all(Object.keys(librariesInUse).map((key) => {
             const dependency = librariesInUse[key];
-            const data: Partial<CoreH5PContentsLibraryDBRecord> = {
+
+            return this.contentsLibrariesTables[targetSiteId].insert({
                 h5pid: id,
                 libraryid: dependency.library.libraryId,
                 dependencytype: dependency.type,
                 dropcss: dropLibraryCssList[dependency.library.machineName] ? 1 : 0,
-                weight: dependency.weight,
-            };
-
-            return db.insertRecord(CONTENTS_LIBRARIES_TABLE_NAME, data);
+                weight: dependency.weight ?? 0,
+            });
         }));
+    }
+
+    /**
+     * Store missing dependencies in DB.
+     *
+     * @param fileUrl URL of the package that has missing dependencies.
+     * @param missingDependencies List of missing dependencies.
+     * @param options Other options.
+     */
+    async storeMissingDependencies(
+        fileUrl: string,
+        missingDependencies: CoreH5PMissingLibrary[],
+        options: StoreMissingDependenciesOptions = {},
+    ): Promise<void> {
+        const targetSiteId = options.siteId ?? CoreSites.getCurrentSiteId();
+
+        const fileId = await this.getFileIdForMissingDependencies(fileUrl, targetSiteId);
+
+        await Promise.all(missingDependencies.map((missingLibrary) => this.missingDependenciesTables[targetSiteId].insert({
+            fileid: fileId,
+            machinename: missingLibrary.machineName,
+            majorversion: missingLibrary.majorVersion,
+            minorversion: missingLibrary.minorVersion,
+            requiredby: missingLibrary.libString,
+            filetimemodified: options.fileTimemodified ?? 0,
+            component: options.component,
+            componentId: options.componentId,
+        })));
     }
 
     /**
@@ -843,8 +1102,7 @@ export class CoreH5PFramework {
      * @returns Promise resolved with content ID.
      */
     async updateContent(content: CoreH5PContentBeingSaved, folderName: string, fileUrl: string, siteId?: string): Promise<number> {
-
-        const db = await CoreSites.getSiteDb(siteId);
+        siteId ??= CoreSites.getCurrentSiteId();
 
         // If the libraryid declared in the package is empty, get the latest version.
         if (content.library && content.library.libraryId === undefined) {
@@ -856,37 +1114,36 @@ export class CoreH5PFramework {
         // Add title to 'params' to be able to add it to metadata later.
         if (typeof content.title === 'string') {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const params = CoreTextUtils.parseJSON<any>(content.params || '{}');
+            const params = CoreText.parseJSON<any>(content.params || '{}');
             params.title = content.title;
             content.params = JSON.stringify(params);
         }
 
-        const data: Partial<CoreH5PContentDBRecord> = {
-            id: undefined,
-            jsoncontent: content.params,
+        if (typeof content.library?.libraryId !== 'number') {
+            throw new CoreError('Attempted to create content of library without id');
+        }
+
+        const data: SubPartial<CoreH5PContentDBRecord, 'id'> = {
+            jsoncontent: content.params ?? '{}',
             mainlibraryid: content.library?.libraryId,
             timemodified: Date.now(),
             filtered: null,
             foldername: folderName,
             fileurl: fileUrl,
-            timecreated: undefined,
+            timecreated: Date.now(),
         };
         let contentId: number | undefined;
 
         if (content.id !== undefined) {
             data.id = content.id;
             contentId = content.id;
-        } else {
-            data.timecreated = data.timemodified;
         }
 
-        await db.insertRecord(CONTENT_TABLE_NAME, data);
+        const newContentId = await this.contentTables[siteId].insert(data);
 
         if (!contentId) {
             // New content. Get its ID.
-            const entry = await db.getRecord<CoreH5PContentDBRecord>(CONTENT_TABLE_NAME, data);
-
-            content.id = entry.id;
+            content.id = newContentId;
             contentId = content.id;
         }
 
@@ -901,12 +1158,9 @@ export class CoreH5PFramework {
      * @param siteId Site ID. If not defined, current site.
      */
     async updateContentFields(id: number, fields: Partial<CoreH5PContentDBRecord>, siteId?: string): Promise<void> {
+        siteId ??= CoreSites.getCurrentSiteId();
 
-        const db = await CoreSites.getSiteDb(siteId);
-
-        const data = Object.assign({}, fields);
-
-        await db.updateRecords(CONTENT_TABLE_NAME, data, { id });
+        await this.contentTables[siteId].update(fields, { id });
     }
 
 }
@@ -948,4 +1202,14 @@ type LibraryDependency = {
 
 type LibraryAddonDBData = Omit<CoreH5PLibraryAddonData, 'addTo'> & {
     addTo: string;
+};
+
+/**
+ * Options for storeMissingDependencies.
+ */
+type StoreMissingDependenciesOptions = {
+    component?: string;
+    componentId?: string | number;
+    fileTimemodified?: number;
+    siteId?: string;
 };

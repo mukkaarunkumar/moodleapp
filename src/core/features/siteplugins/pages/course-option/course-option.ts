@@ -13,12 +13,12 @@
 // limitations under the License.
 
 import { Component, OnInit, ViewChild } from '@angular/core';
-import { IonRefresher } from '@ionic/angular';
 
 import { CoreSitePluginsPluginContentComponent } from '@features/siteplugins/components/plugin-content/plugin-content';
 import { CoreSitePlugins, CoreSitePluginsContent } from '@features/siteplugins/services/siteplugins';
-import { CoreUtils } from '@services/utils/utils';
+import { CoreUtils } from '@singletons/utils';
 import { CoreNavigator } from '@services/navigator';
+import { CoreSharedModule } from '@/core/shared.module';
 
 /**
  * Page that displays the index of a course option site plugin.
@@ -26,8 +26,13 @@ import { CoreNavigator } from '@services/navigator';
 @Component({
     selector: 'core-site-plugins-course-option',
     templateUrl: 'core-siteplugins-course-option.html',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+        CoreSitePluginsPluginContentComponent,
+    ],
 })
-export class CoreSitePluginsCourseOptionPage implements OnInit {
+export default class CoreSitePluginsCourseOptionPage implements OnInit {
 
     @ViewChild(CoreSitePluginsPluginContentComponent) content?: CoreSitePluginsPluginContentComponent;
 
@@ -70,7 +75,7 @@ export class CoreSitePluginsCourseOptionPage implements OnInit {
      *
      * @param refresher Refresher.
      */
-    async refreshData(refresher: IonRefresher): Promise<void> {
+    async refreshData(refresher: HTMLIonRefresherElement): Promise<void> {
         try {
             await this.content?.refreshContent(false);
         } finally {

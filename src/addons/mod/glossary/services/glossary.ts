@@ -14,7 +14,7 @@
 
 import { Injectable } from '@angular/core';
 import { CoreError } from '@classes/errors/error';
-import { CoreSite, CoreSiteWSPreSets } from '@classes/site';
+import { CoreSite } from '@classes/sites/site';
 import { CoreCourseCommonModWSOptions } from '@features/course/services/course';
 import { CoreCourseLogHelper } from '@features/course/services/log-helper';
 import { CoreFileUploaderStoreFilesResult } from '@features/fileuploader/services/fileuploader';
@@ -22,16 +22,26 @@ import { CoreRatingInfo } from '@features/rating/services/rating';
 import { CoreTagItem } from '@features/tag/services/tag';
 import { CoreNetwork } from '@services/network';
 import { CoreSites, CoreSitesCommonWSOptions, CoreSitesReadingStrategy } from '@services/sites';
-import { CoreUtils } from '@services/utils/utils';
+import { CoreObject } from '@singletons/object';
 import { CoreWSExternalFile, CoreWSExternalWarning } from '@services/ws';
 import { makeSingleton, Translate } from '@singletons';
 import { CoreEvents } from '@singletons/events';
 import { AddonModGlossaryEntryDBRecord, ENTRIES_TABLE_NAME } from './database/glossary';
 import { AddonModGlossaryOffline } from './glossary-offline';
-
-export const GLOSSARY_ENTRY_ADDED = 'addon_mod_glossary_entry_added';
-export const GLOSSARY_ENTRY_UPDATED = 'addon_mod_glossary_entry_updated';
-export const GLOSSARY_ENTRY_DELETED = 'addon_mod_glossary_entry_deleted';
+import { CoreSiteWSPreSets } from '@classes/sites/authenticated-site';
+import {
+    ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
+    ADDON_MOD_GLOSSARY_ENTRY_ADDED,
+    ADDON_MOD_GLOSSARY_ENTRY_DELETED,
+    ADDON_MOD_GLOSSARY_ENTRY_UPDATED,
+    ADDON_MOD_GLOSSARY_LIMIT_CATEGORIES,
+    ADDON_MOD_GLOSSARY_LIMIT_ENTRIES,
+} from '../constants';
+import { CoreCacheUpdateFrequency } from '@/core/constants';
+import { CorePromiseUtils } from '@singletons/promise-utils';
+import { CoreWSError } from '@classes/errors/wserror';
+import { CoreTextFormat, DEFAULT_TEXT_FORMAT } from '@singletons/text';
+import { CoreCourseModuleHelper, CoreCourseModuleStandardElements } from '@features/course/services/course-module-helper';
 
 /**
  * Service that provides some features for glossaries.
@@ -39,12 +49,8 @@ export const GLOSSARY_ENTRY_DELETED = 'addon_mod_glossary_entry_deleted';
 @Injectable({ providedIn: 'root' })
 export class AddonModGlossaryProvider {
 
-    static readonly COMPONENT = 'mmaModGlossary';
-    static readonly LIMIT_ENTRIES = 25;
-    static readonly LIMIT_CATEGORIES = 10;
-
-    private static readonly SHOW_ALL_CATEGORIES = 0;
-    private static readonly ROOT_CACHE_KEY = 'mmaModGlossary:';
+    protected static readonly SHOW_ALL_CATEGORIES = 0;
+    protected static readonly ROOT_CACHE_KEY = 'mmaModGlossary:';
 
     /**
      * Get the course glossary cache key.
@@ -71,8 +77,8 @@ export class AddonModGlossaryProvider {
         };
         const preSets: CoreSiteWSPreSets = {
             cacheKey: this.getCourseGlossariesCacheKey(courseId),
-            updateFrequency: CoreSite.FREQUENCY_RARELY,
-            component: AddonModGlossaryProvider.COMPONENT,
+            updateFrequency: CoreCacheUpdateFrequency.RARELY,
+            component: ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             ...CoreSites.getReadingStrategyPreSets(options.readingStrategy), // Include reading strategy preSets.
         };
 
@@ -128,12 +134,12 @@ export class AddonModGlossaryProvider {
             field: 'LASTNAME',
             sort: 'ASC',
             from: options.from || 0,
-            limit: options.limit || AddonModGlossaryProvider.LIMIT_ENTRIES,
+            limit: options.limit || ADDON_MOD_GLOSSARY_LIMIT_ENTRIES,
         };
         const preSets: CoreSiteWSPreSets = {
             cacheKey: this.getEntriesByAuthorCacheKey(glossaryId),
-            updateFrequency: CoreSite.FREQUENCY_SOMETIMES,
-            component: AddonModGlossaryProvider.COMPONENT,
+            updateFrequency: CoreCacheUpdateFrequency.SOMETIMES,
+            component: ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             componentId: options.cmId,
             ...CoreSites.getReadingStrategyPreSets(options.readingStrategy), // Include reading strategy preSets.
         };
@@ -172,12 +178,12 @@ export class AddonModGlossaryProvider {
             id: glossaryId,
             categoryid: AddonModGlossaryProvider.SHOW_ALL_CATEGORIES,
             from: options.from || 0,
-            limit: options.limit || AddonModGlossaryProvider.LIMIT_ENTRIES,
+            limit: options.limit || ADDON_MOD_GLOSSARY_LIMIT_ENTRIES,
         };
         const preSets: CoreSiteWSPreSets = {
             cacheKey: this.getEntriesByCategoryCacheKey(glossaryId),
-            updateFrequency: CoreSite.FREQUENCY_SOMETIMES,
-            component: AddonModGlossaryProvider.COMPONENT,
+            updateFrequency: CoreCacheUpdateFrequency.SOMETIMES,
+            component: ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             componentId: options.cmId,
             ...CoreSites.getReadingStrategyPreSets(options.readingStrategy), // Include reading strategy preSets.
         };
@@ -242,12 +248,12 @@ export class AddonModGlossaryProvider {
             order: order,
             sort: 'DESC',
             from: options.from || 0,
-            limit: options.limit || AddonModGlossaryProvider.LIMIT_ENTRIES,
+            limit: options.limit || ADDON_MOD_GLOSSARY_LIMIT_ENTRIES,
         };
         const preSets: CoreSiteWSPreSets = {
             cacheKey: this.getEntriesByDateCacheKey(glossaryId, order),
-            updateFrequency: CoreSite.FREQUENCY_SOMETIMES,
-            component: AddonModGlossaryProvider.COMPONENT,
+            updateFrequency: CoreCacheUpdateFrequency.SOMETIMES,
+            component: ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             componentId: options.cmId,
             ...CoreSites.getReadingStrategyPreSets(options.readingStrategy), // Include reading strategy preSets.
         };
@@ -291,21 +297,21 @@ export class AddonModGlossaryProvider {
         glossaryId: number,
         options: AddonModGlossaryGetEntriesOptions = {},
     ): Promise<AddonModGlossaryGetEntriesWSResponse> {
-        options.from = options.from || 0;
-        options.limit = options.limit || AddonModGlossaryProvider.LIMIT_ENTRIES;
+        const from = options.from || 0;
+        const limit = options.limit || ADDON_MOD_GLOSSARY_LIMIT_ENTRIES;
 
         const site = await CoreSites.getSite(options.siteId);
 
         const params: AddonModGlossaryGetEntriesByLetterWSParams = {
             id: glossaryId,
             letter: 'ALL',
-            from: options.from,
-            limit: options.limit,
+            from,
+            limit,
         };
         const preSets: CoreSiteWSPreSets = {
             cacheKey: this.getEntriesByLetterCacheKey(glossaryId),
-            updateFrequency: CoreSite.FREQUENCY_SOMETIMES,
-            component: AddonModGlossaryProvider.COMPONENT,
+            updateFrequency: CoreCacheUpdateFrequency.SOMETIMES,
+            component: ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             componentId: options.cmId,
             ...CoreSites.getReadingStrategyPreSets(options.readingStrategy), // Include reading strategy preSets.
         };
@@ -316,9 +322,9 @@ export class AddonModGlossaryProvider {
             preSets,
         );
 
-        if (options.limit == AddonModGlossaryProvider.LIMIT_ENTRIES) {
+        if (limit === ADDON_MOD_GLOSSARY_LIMIT_ENTRIES) {
             // Store entries in background, don't block the user for this.
-            CoreUtils.ignoreErrors(this.storeEntries(glossaryId, result.entries, options.from, site.getId()));
+            CorePromiseUtils.ignoreErrors(this.storeEntries(glossaryId, result.entries, from, site.getId()));
         }
 
         return result;
@@ -374,12 +380,12 @@ export class AddonModGlossaryProvider {
             order: 'CONCEPT',
             sort: 'ASC',
             from: options.from || 0,
-            limit: options.limit || AddonModGlossaryProvider.LIMIT_ENTRIES,
+            limit: options.limit || ADDON_MOD_GLOSSARY_LIMIT_ENTRIES,
         };
         const preSets: CoreSiteWSPreSets = {
             cacheKey: this.getEntriesBySearchCacheKey(glossaryId, query, fullSearch),
-            updateFrequency: CoreSite.FREQUENCY_SOMETIMES,
-            component: AddonModGlossaryProvider.COMPONENT,
+            updateFrequency: CoreCacheUpdateFrequency.SOMETIMES,
+            component: ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             componentId: options.cmId,
             ...CoreSites.getReadingStrategyPreSets(options.readingStrategy), // Include reading strategy preSets.
         };
@@ -415,7 +421,7 @@ export class AddonModGlossaryProvider {
      * @returns The cache key.
      */
     protected getCategoriesCacheKey(glossaryId: number): string {
-        return AddonModGlossaryProvider.ROOT_CACHE_KEY + 'categories:' + glossaryId;
+        return `${AddonModGlossaryProvider.ROOT_CACHE_KEY}categories:${glossaryId}`;
     }
 
     /**
@@ -446,18 +452,18 @@ export class AddonModGlossaryProvider {
         site: CoreSite,
         options: AddonModGlossaryGetCategoriesOptions = {},
     ): Promise<AddonModGlossaryCategory[]> {
-        options.from = options.from || 0;
-        options.limit = options.limit || AddonModGlossaryProvider.LIMIT_CATEGORIES;
+        const from = options.from || 0;
+        const limit = options.limit || ADDON_MOD_GLOSSARY_LIMIT_CATEGORIES;
 
         const params: AddonModGlossaryGetCategoriesWSParams = {
             id: glossaryId,
-            from: options.from,
-            limit: options.limit,
+            from,
+            limit,
         };
         const preSets: CoreSiteWSPreSets = {
             cacheKey: this.getCategoriesCacheKey(glossaryId),
-            updateFrequency: CoreSite.FREQUENCY_SOMETIMES,
-            component: AddonModGlossaryProvider.COMPONENT,
+            updateFrequency: CoreCacheUpdateFrequency.SOMETIMES,
+            component: ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             componentId: options.cmId,
             ...CoreSites.getReadingStrategyPreSets(options.readingStrategy), // Include reading strategy preSets.
         };
@@ -465,11 +471,12 @@ export class AddonModGlossaryProvider {
         const response = await site.read<AddonModGlossaryGetCategoriesWSResponse>('mod_glossary_get_categories', params, preSets);
 
         categories = categories.concat(response.categories);
-        const canLoadMore = (options.from + options.limit) < response.count;
+        const canLoadMore = (from + limit) < response.count;
         if (canLoadMore) {
-            options.from += options.limit;
-
-            return this.getCategories(glossaryId, categories, site, options);
+            return this.getCategories(glossaryId, categories, site, {
+                ...options,
+                from: from + limit,
+            });
         }
 
         return categories;
@@ -504,7 +511,7 @@ export class AddonModGlossaryProvider {
      * @param options Other options.
      * @returns Promise resolved with the entry.
      */
-    async getEntry(entryId: number, options: CoreCourseCommonModWSOptions = {}): Promise<AddonModGlossaryGetEntryByIdResponse> {
+    async getEntry(entryId: number, options: AddonModGlossaryGetEntryOptions = {}): Promise<AddonModGlossaryGetEntryByIdResponse> {
         const site = await CoreSites.getSite(options.siteId);
 
         const params: AddonModGlossaryGetEntryByIdWSParams = {
@@ -512,21 +519,28 @@ export class AddonModGlossaryProvider {
         };
         const preSets = {
             cacheKey: this.getEntryCacheKey(entryId),
-            updateFrequency: CoreSite.FREQUENCY_RARELY,
-            component: AddonModGlossaryProvider.COMPONENT,
+            updateFrequency: CoreCacheUpdateFrequency.RARELY,
+            component: ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             componentId: options.cmId,
             ...CoreSites.getReadingStrategyPreSets(options.readingStrategy), // Include reading strategy preSets.
+            filter: options.filter !== false,
+            rewriteurls: options.filter !== false,
         };
 
         try {
             return await site.read<AddonModGlossaryGetEntryByIdWSResponse>('mod_glossary_get_entry_by_id', params, preSets);
         } catch (error) {
+            if (!preSets.getFromCache) {
+                // Cache disabled, throw the error instead of returning the cached data from the list of entries.
+                throw error;
+            }
+
             // Entry not found. Search it in the list of entries.
             try {
                 const data = await this.getStoredDataForEntry(entryId, site.getId());
 
                 if (data.from !== undefined) {
-                    const response = await CoreUtils.ignoreErrors(
+                    const response = await CorePromiseUtils.ignoreErrors(
                         this.getEntryFromList(data.glossaryId, entryId, data.from, false, options),
                     );
 
@@ -624,6 +638,7 @@ export class AddonModGlossaryProvider {
      *
      * @param siteId Site id.
      * @returns Whether the site can update entries.
+     * @since 3.10
      */
     async canUpdateEntries(siteId?: string): Promise<boolean> {
         const site = await CoreSites.getSite(siteId);
@@ -699,9 +714,9 @@ export class AddonModGlossaryProvider {
     async invalidateContent(moduleId: number, courseId: number): Promise<void> {
         const glossary = await this.getGlossary(courseId, moduleId);
 
-        await CoreUtils.ignoreErrors(this.invalidateGlossaryEntries(glossary));
+        await CorePromiseUtils.ignoreErrors(this.invalidateGlossaryEntries(glossary));
 
-        await CoreUtils.allPromises([
+        await CorePromiseUtils.allPromises([
             this.invalidateCourseGlossaries(courseId),
             this.invalidateCategories(glossary.id),
         ]);
@@ -747,7 +762,7 @@ export class AddonModGlossaryProvider {
             }
         });
 
-        await CoreUtils.allPromises(promises);
+        await CorePromiseUtils.allPromises(promises);
     }
 
     /**
@@ -761,13 +776,7 @@ export class AddonModGlossaryProvider {
     async getGlossary(courseId: number, cmId: number, options: CoreSitesCommonWSOptions = {}): Promise<AddonModGlossaryGlossary> {
         const glossaries = await this.getCourseGlossaries(courseId, options);
 
-        const glossary = glossaries.find((glossary) => glossary.coursemodule == cmId);
-
-        if (glossary) {
-            return glossary;
-        }
-
-        throw new CoreError(Translate.instant('core.course.modulenotfound'));
+        return CoreCourseModuleHelper.getActivityByCmId(glossaries, cmId);
     }
 
     /**
@@ -785,13 +794,7 @@ export class AddonModGlossaryProvider {
     ): Promise<AddonModGlossaryGlossary> {
         const glossaries = await this.getCourseGlossaries(courseId, options);
 
-        const glossary = glossaries.find((glossary) => glossary.id == glossaryId);
-
-        if (glossary) {
-            return glossary;
-        }
-
-        throw new CoreError(Translate.instant('core.course.modulenotfound'));
+        return CoreCourseModuleHelper.getActivityByField(glossaries, 'id', glossaryId);
     }
 
     /**
@@ -869,7 +872,7 @@ export class AddonModGlossaryProvider {
 
             return entryId;
         } catch (error) {
-            if (otherOptions.allowOffline && !CoreUtils.isWebServiceError(error)) {
+            if (otherOptions.allowOffline && !CoreWSError.isWebServiceError(error)) {
                 // Couldn't connect to server, store in offline.
                 return storeOffline();
             }
@@ -904,8 +907,8 @@ export class AddonModGlossaryProvider {
             glossaryid: glossaryId,
             concept: concept,
             definition: definition,
-            definitionformat: 1,
-            options: CoreUtils.objectToArrayOfObjects(options || {}, 'name', 'value'),
+            definitionformat: DEFAULT_TEXT_FORMAT,
+            options: CoreObject.toArrayOfObjects(options || {}, 'name', 'value'),
         };
 
         if (attachId) {
@@ -917,7 +920,7 @@ export class AddonModGlossaryProvider {
 
         const response = await site.write<AddonModGlossaryAddEntryWSResponse>('mod_glossary_add_entry', params);
 
-        CoreEvents.trigger(GLOSSARY_ENTRY_ADDED, { glossaryId, entryId: response.entryid }, siteId);
+        CoreEvents.trigger(ADDON_MOD_GLOSSARY_ENTRY_ADDED, { glossaryId, entryId: response.entryid }, siteId);
 
         return response.entryid;
     }
@@ -948,8 +951,8 @@ export class AddonModGlossaryProvider {
             entryid: entryId,
             concept: concept,
             definition: definition,
-            definitionformat: 1,
-            options: CoreUtils.objectToArrayOfObjects(options || {}, 'name', 'value'),
+            definitionformat: DEFAULT_TEXT_FORMAT,
+            options: CoreObject.toArrayOfObjects(options || {}, 'name', 'value'),
         };
 
         if (attachId) {
@@ -965,7 +968,7 @@ export class AddonModGlossaryProvider {
             throw new CoreError(response.warnings?.[0].message ?? 'Error updating entry');
         }
 
-        CoreEvents.trigger(GLOSSARY_ENTRY_UPDATED, { glossaryId, entryId }, siteId);
+        CoreEvents.trigger(ADDON_MOD_GLOSSARY_ENTRY_UPDATED, { glossaryId, entryId }, siteId);
     }
 
     /**
@@ -979,7 +982,7 @@ export class AddonModGlossaryProvider {
 
         await site.write('mod_glossary_delete_entry', { entryid: entryId });
 
-        CoreEvents.trigger(GLOSSARY_ENTRY_DELETED, { glossaryId, entryId });
+        CoreEvents.trigger(ADDON_MOD_GLOSSARY_ENTRY_DELETED, { glossaryId, entryId });
     }
 
     /**
@@ -1031,7 +1034,7 @@ export class AddonModGlossaryProvider {
         await CoreCourseLogHelper.log(
             'mod_glossary_view_glossary',
             params,
-            AddonModGlossaryProvider.COMPONENT,
+            ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             glossaryId,
             siteId,
         );
@@ -1052,7 +1055,7 @@ export class AddonModGlossaryProvider {
         await CoreCourseLogHelper.log(
             'mod_glossary_view_entry',
             params,
-            AddonModGlossaryProvider.COMPONENT,
+            ADDON_MOD_GLOSSARY_COMPONENT_LEGACY,
             glossaryId,
             siteId,
         );
@@ -1095,6 +1098,26 @@ export class AddonModGlossaryProvider {
         await site.getDb().insertRecord(ENTRIES_TABLE_NAME, entry);
     }
 
+    /**
+     * Prepare entry for edition.
+     *
+     * @param entryId Entry ID.
+     * @param siteId Site ID.
+     * @returns Data of prepared area.
+     */
+    async prepareEntryForEdition(
+        entryId: number,
+        siteId?: string,
+    ): Promise<AddonModGlossaryPrepareEntryForEditionWSResponse> {
+        const site = await CoreSites.getSite(siteId);
+
+        const params: AddonModGlossaryPrepareEntryForEditionWSParams = {
+            entryid: entryId,
+        };
+
+        return await site.write('mod_glossary_prepare_entry_for_edition', params);
+    }
+
 }
 
 export const AddonModGlossary = makeSingleton(AddonModGlossaryProvider);
@@ -1107,15 +1130,15 @@ declare module '@singletons/events' {
      * @see https://www.typescriptlang.org/docs/handbook/declaration-merging.html#module-augmentation
      */
     export interface CoreEventsData {
-        [GLOSSARY_ENTRY_ADDED]: AddonModGlossaryEntryAddedEventData;
-        [GLOSSARY_ENTRY_UPDATED]: AddonModGlossaryEntryUpdatedEventData;
-        [GLOSSARY_ENTRY_DELETED]: AddonModGlossaryEntryDeletedEventData;
+        [ADDON_MOD_GLOSSARY_ENTRY_ADDED]: AddonModGlossaryEntryAddedEventData;
+        [ADDON_MOD_GLOSSARY_ENTRY_UPDATED]: AddonModGlossaryEntryUpdatedEventData;
+        [ADDON_MOD_GLOSSARY_ENTRY_DELETED]: AddonModGlossaryEntryDeletedEventData;
     }
 
 }
 
 /**
- * GLOSSARY_ENTRY_ADDED event payload.
+ * ADDON_MOD_GLOSSARY_ENTRY_ADDED event payload.
  */
 export type AddonModGlossaryEntryAddedEventData = {
     glossaryId: number;
@@ -1124,7 +1147,7 @@ export type AddonModGlossaryEntryAddedEventData = {
 };
 
 /**
- * GLOSSARY_ENTRY_UPDATED event payload.
+ * ADDON_MOD_GLOSSARY_ENTRY_UPDATED event payload.
  */
 export type AddonModGlossaryEntryUpdatedEventData = {
     glossaryId: number;
@@ -1133,7 +1156,7 @@ export type AddonModGlossaryEntryUpdatedEventData = {
 };
 
 /**
- * GLOSSARY_ENTRY_DELETED event payload.
+ * ADDON_MOD_GLOSSARY_ENTRY_DELETED event payload.
  */
 export type AddonModGlossaryEntryDeletedEventData = {
     glossaryId: number;
@@ -1159,14 +1182,7 @@ export type AddonModGlossaryGetGlossariesByCoursesWSResponse = {
 /**
  * Data returned by mod_glossary_get_glossaries_by_courses WS.
  */
-export type AddonModGlossaryGlossary = {
-    id: number; // Glossary id.
-    coursemodule: number; // Course module id.
-    course: number; // Course id.
-    name: string; // Glossary name.
-    intro: string; // The Glossary intro.
-    introformat: number; // Intro format (1 = HTML, 0 = MOODLE, 2 = PLAIN or 4 = MARKDOWN).
-    introfiles?: CoreWSExternalFile[];
+export type AddonModGlossaryGlossary = CoreCourseModuleStandardElements & {
     allowduplicatedentries: number; // If enabled, multiple entries can have the same concept name.
     displayformat: string; // Display format type.
     mainglossary: number; // If enabled this glossary is a main glossary.
@@ -1190,10 +1206,6 @@ export type AddonModGlossaryGlossary = {
     timecreated: number; // Time created.
     timemodified: number; // Time modified.
     completionentries: number; // Number of entries to complete.
-    section: number; // Section.
-    visible: number; // Visible.
-    groupmode: number; // Group mode.
-    groupingid: number; // Grouping ID.
     browsemodes: string[];
     canaddentry?: number; // Whether the user can add a new entry.
 };
@@ -1281,7 +1293,7 @@ export type AddonModGlossaryEntry = {
     userpictureurl: string; // Author picture.
     concept: string; // The concept.
     definition: string; // The definition.
-    definitionformat: number; // Definition format (1 = HTML, 0 = MOODLE, 2 = PLAIN or 4 = MARKDOWN).
+    definitionformat: CoreTextFormat; // Definition format (1 = HTML, 0 = MOODLE, 2 = PLAIN or 4 = MARKDOWN).
     definitiontrust: boolean; // The definition trust flag.
     definitioninlinefiles?: CoreWSExternalFile[];
     attachment: boolean; // Whether or not the entry has attachments.
@@ -1367,7 +1379,7 @@ export type AddonModGlossaryAddEntryWSParams = {
     glossaryid: number; // Glossary id.
     concept: string; // Glossary concept.
     definition: string; // Glossary concept definition.
-    definitionformat: number; // Definition format (1 = HTML, 0 = MOODLE, 2 = PLAIN or 4 = MARKDOWN).
+    definitionformat: CoreTextFormat; // Definition format (1 = HTML, 0 = MOODLE, 2 = PLAIN or 4 = MARKDOWN).
     options?: { // Optional settings.
         name: string; // The allowed keys (value format) are:
         // inlineattachmentsid (int); the draft file area id for inline attachments
@@ -1396,7 +1408,7 @@ export type AddonModGlossaryUpdateEntryWSParams = {
     entryid: number; // Glossary entry id to update.
     concept: string; // Glossary concept.
     definition: string; // Glossary concept definition.
-    definitionformat: number; // Definition format (1 = HTML, 0 = MOODLE, 2 = PLAIN or 4 = MARKDOWN).
+    definitionformat: CoreTextFormat; // Definition format (1 = HTML, 0 = MOODLE, 2 = PLAIN or 4 = MARKDOWN).
     options?: { // Optional settings.
         name: string; // The allowed keys (value format) are:
         // inlineattachmentsid (int); the draft file area id for inline attachments
@@ -1434,6 +1446,31 @@ export type AddonModGlossaryViewEntryWSParams = {
 };
 
 /**
+ * Params of mod_glossary_prepare_entry_for_edition WS.
+ */
+type AddonModGlossaryPrepareEntryForEditionWSParams = {
+    entryid: number; // Glossary entry id to update.
+};
+
+/**
+ * Data returned by mod_glossary_prepare_entry_for_edition WS.
+ */
+export type AddonModGlossaryPrepareEntryForEditionWSResponse = {
+    inlineattachmentsid: number; // Draft item id for the text editor.
+    attachmentsid: number; // Draft item id for the file manager.
+    areas: { // File areas including options.
+        area: string; // File area name.
+        options: { // Draft file area options.
+            name: string; // Name of option.
+            value: string; // Value of option.
+        }[];
+    }[];
+    aliases: string[];
+    categories: number[];
+    warnings?: CoreWSExternalWarning[];
+};
+
+/**
  * Options to pass to add entry.
  */
 export type AddonModGlossaryAddEntryOptions = {
@@ -1449,7 +1486,7 @@ export type AddonModGlossaryAddEntryOptions = {
  */
 export type AddonModGlossaryGetEntriesOptions = CoreCourseCommonModWSOptions & {
     from?: number; // Start returning records from here. Defaults to 0.
-    limit?: number; // Number of records to return. Defaults to AddonModGlossaryProvider.LIMIT_ENTRIES.
+    limit?: number; // Number of records to return. Defaults to ADDON_MOD_GLOSSARY_LIMIT_ENTRIES.
 };
 
 /**
@@ -1457,7 +1494,7 @@ export type AddonModGlossaryGetEntriesOptions = CoreCourseCommonModWSOptions & {
  */
 export type AddonModGlossaryGetCategoriesOptions = CoreCourseCommonModWSOptions & {
     from?: number; // Start returning records from here. Defaults to 0.
-    limit?: number; // Number of records to return. Defaults to AddonModGlossaryProvider.LIMIT_CATEGORIES.
+    limit?: number; // Number of records to return. Defaults to ADDON_MOD_GLOSSARY_LIMIT_CATEGORIES.
 };
 
 /**
@@ -1473,3 +1510,10 @@ export type AddonModGlossaryIsConceptUsedOptions = {
  * Possible values for entry options.
  */
 export type AddonModGlossaryEntryOption = string | number;
+
+/**
+ * Options for getEntry.
+ */
+export type AddonModGlossaryGetEntryOptions = CoreCourseCommonModWSOptions & {
+    filter?: boolean; // Defaults to true. If false, text won't be filtered and URLs won't be rewritten.
+};

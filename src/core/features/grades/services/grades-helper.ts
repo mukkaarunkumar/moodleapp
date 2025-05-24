@@ -22,7 +22,7 @@ import {
     CoreCourseSearchedData,
     CoreCourseUserAdminOrNavOptionIndexed,
 } from '@features/courses/services/courses';
-import { CoreCourse, CoreCourseProvider } from '@features/course/services/course';
+import { CoreCourse } from '@features/course/services/course';
 import {
     CoreGrades,
     CoreGradesGradeItem,
@@ -33,20 +33,23 @@ import {
     CoreGradesTableLeaderColumn,
     CoreGradesTableRow,
 } from '@features/grades/services/grades';
-import { CoreTextUtils } from '@services/utils/text';
-import { CoreUrlUtils } from '@services/utils/url';
-import { CoreMenuItem, CoreUtils } from '@services/utils/utils';
-import { CoreDomUtils } from '@services/utils/dom';
+import { CoreText } from '@singletons/text';
+import { CoreUrl } from '@singletons/url';
+import { CoreMenuItem, CoreUtils } from '@singletons/utils';
+import { CoreDom } from '@singletons/dom';
 import { CoreNavigator } from '@services/navigator';
 import { makeSingleton, Translate } from '@singletons';
 import { CoreError } from '@classes/errors/error';
 import { CoreCourseHelper } from '@features/course/services/course-helper';
-import { CoreAppProvider } from '@services/app';
 import { CoreCourseModuleDelegate } from '@features/course/services/module-delegate';
 import { CoreCourseAccess } from '@features/course/services/course-options-delegate';
-
-export const GRADES_PAGE_NAME = 'grades';
-export const GRADES_PARTICIPANTS_PAGE_NAME = 'participant-grades';
+import { CoreLoadings } from '@services/overlays/loadings';
+import { convertTextToHTMLElement } from '@/core/utils/create-html-element';
+import { CoreCourseAccessDataType } from '@features/course/constants';
+import { CorePromiseUtils } from '@singletons/promise-utils';
+import { CoreArray } from '@singletons/array';
+import { CoreCourseModuleHelper } from '@features/course/services/course-module-helper';
+import { GRADES_PAGE_NAME } from '../constants';
 
 /**
  * Service that provides some features regarding grades information.
@@ -54,54 +57,7 @@ export const GRADES_PARTICIPANTS_PAGE_NAME = 'participant-grades';
 @Injectable({ providedIn: 'root' })
 export class CoreGradesHelperProvider {
 
-    protected logger: CoreLogger;
-
-    constructor() {
-        this.logger = CoreLogger.getInstance('CoreGradesHelperProvider');
-    }
-
-    /**
-     * Formats a row from the grades table te be rendered in a page.
-     *
-     * @param tableRow JSON object representing row of grades table data.
-     * @returns Formatted row object.
-     * @deprecated since app 4.0
-     */
-    protected async formatGradeRow(tableRow: CoreGradesTableRow): Promise<CoreGradesFormattedRow> {
-        const row: CoreGradesFormattedRow = {
-            rowclass: '',
-        };
-        for (const name in tableRow) {
-            const column: CoreGradesTableColumn = tableRow[name];
-
-            if (column.content === undefined || column.content === null) {
-                continue;
-            }
-
-            let content = String(column.content);
-
-            if (name == 'itemname') {
-                await this.setRowIconAndType(row, content);
-
-                row.link = this.getModuleLink(content);
-                row.rowclass += column.class.indexOf('hidden') >= 0 ? ' hidden' : '';
-                row.rowclass += column.class.indexOf('dimmed_text') >= 0 ? ' dimmed_text' : '';
-
-                content = content.replace(/<\/span>/gi, '\n');
-                content = CoreTextUtils.cleanTags(content);
-            } else {
-                content = CoreTextUtils.replaceNewLines(content, '<br>');
-            }
-
-            if (content == '&nbsp;') {
-                content = '';
-            }
-
-            row[name] = content.trim();
-        }
-
-        return row;
-    }
+    protected logger = CoreLogger.getInstance('CoreGradesHelperProvider');
 
     /**
      * Formats a row from the grades table to be rendered in one table.
@@ -148,30 +104,38 @@ export class CoreGradesHelperProvider {
                 row.rowclass += itemNameColumn.class.indexOf('hidden') >= 0 ? ' hidden' : '';
                 row.rowclass += itemNameColumn.class.indexOf('dimmed_text') >= 0 ? ' dimmed_text' : '';
 
-                if (!useLegacyLayout && !CoreAppProvider.isAutomated()) {
-                    // Activity name is only included in the webservice response from the latest version when behat is not running.
+                if (!useLegacyLayout) {
+                    // Remove the "title" of the row (activity name, 'Manual item', 'Aggregation', etc.).
                     content = content.replace(/<span[^>]+>.+?<\/span>/i, '');
                 }
 
                 content = content.replace(/<\/span>/gi, '\n');
-                content = CoreTextUtils.cleanTags(content, { trim: true });
+                content = CoreText.cleanTags(content, { trim: true });
                 name = 'gradeitem';
             } else if (name === 'grade') {
                 // Add the pass/fail class if present.
                 row.gradeClass = column.class.includes('gradepass') ? 'text-success' :
                     (column.class.includes('gradefail') ? 'text-danger' : '');
 
+                if (content.includes('action-menu')) {
+                    content = CoreText.processHTML(content, (element) => {
+                        element.querySelector('.action-menu')?.parentElement?.remove();
+                    });
+                }
+
                 if (content.includes('fa-check')) {
                     row.gradeIcon = 'fas-check';
                     row.gradeIconAlt = Translate.instant('core.grades.pass');
-                    content = CoreTextUtils.cleanTags(content);
+                    content = CoreText.cleanTags(content);
                 } else if (content.includes('fa-times') || content.includes('fa-xmark')) {
                     row.gradeIcon = 'fas-xmark';
                     row.gradeIconAlt = Translate.instant('core.grades.fail');
-                    content = CoreTextUtils.cleanTags(content);
+                    content = CoreText.cleanTags(content);
                 }
+
+                row.penalty = CoreGradesHelper.getPenaltyFromGrade(content);
             } else {
-                content = CoreTextUtils.replaceNewLines(content, '<br>');
+                content = CoreText.replaceNewLines(content, '<br>');
             }
 
             if (row.itemtype !== 'category') {
@@ -239,7 +203,7 @@ export class CoreGradesHelperProvider {
         // Get a row with some info.
         let normalRow = formatted.rows.find(
             row =>
-                row.itemtype != 'leader' &&
+                row.itemtype !== 'leader' &&
                 (row.grade !== undefined || row.percentage !== undefined),
         );
 
@@ -249,7 +213,7 @@ export class CoreGradesHelperProvider {
         } else if (normalRow && normalRow.percentage !== undefined) {
             columns.percentage = true;
         } else {
-            normalRow = formatted.rows.find((e) => e.itemtype != 'leader');
+            normalRow = formatted.rows.find((e) => e.itemtype !== 'leader');
             columns.grade = true;
         }
 
@@ -257,7 +221,7 @@ export class CoreGradesHelperProvider {
             if (normalRow && normalRow[colName] !== undefined) {
                 formatted.columns.push({
                     name: colName,
-                    colspan: colName == 'gradeitem' ? maxDepth : 1,
+                    colspan: colName === 'gradeitem' ? maxDepth : 1,
                     hiddenPhone: !columns[colName],
                 });
             }
@@ -305,7 +269,7 @@ export class CoreGradesHelperProvider {
 
         try {
             const courses = await CoreCourses.getUserCourses(undefined, undefined, CoreSitesReadingStrategy.ONLY_CACHE);
-            const coursesMap = CoreUtils.arrayToObject(courses, 'id');
+            const coursesMap = CoreArray.toObject(courses, 'id');
 
             coursesWereMissing = this.addCourseData(grades, coursesMap);
         } catch {
@@ -316,7 +280,7 @@ export class CoreGradesHelperProvider {
         if (coursesWereMissing) {
             const courses = await CoreCourses.getCoursesByField('ids', grades.map((grade) => grade.courseid).join(','));
             const coursesMap =
-                CoreUtils.arrayToObject(courses as Record<string, unknown>[], 'id') as
+                CoreArray.toObject(courses as Record<string, unknown>[], 'id') as
                     Record<string, CoreEnrolledCourseData> |
                     Record<string, CoreCourseSearchedData>;
 
@@ -351,33 +315,6 @@ export class CoreGradesHelperProvider {
         }
 
         return someCoursesAreMissing;
-    }
-
-    /**
-     * Get an specific grade item.
-     *
-     * @param courseId ID of the course to get the grades from.
-     * @param gradeId Grade ID.
-     * @param userId ID of the user to get the grades from. If not defined use site's current user.
-     * @param siteId Site ID. If not defined, current site.
-     * @param ignoreCache True if it should ignore cached data (it will always fail in offline or server down).
-     * @returns Promise to be resolved when the grades are retrieved.
-     * @deprecated since app 4.0
-     */
-    async getGradeItem(
-        courseId: number,
-        gradeId: number,
-        userId?: number,
-        siteId?: string,
-        ignoreCache: boolean = false,
-    ): Promise<CoreGradesFormattedRow | null> {
-        const grades = await CoreGrades.getCourseGradesTable(courseId, userId, siteId, ignoreCache);
-
-        if (!grades) {
-            throw new CoreError('Couldn\'t get grade item');
-        }
-
-        return this.getGradesTableRow(grades, gradeId);
     }
 
     /**
@@ -449,7 +386,7 @@ export class CoreGradesHelperProvider {
      * @returns URL linking to the module.
      */
     protected getModuleLink(text: string): string | false {
-        const el = CoreDomUtils.toDom(text)[0];
+        const el = CoreDom.toDom(text)[0];
         const link = el.attributes['href'] ? el.attributes['href'].value : false;
 
         if (!link || link.indexOf('/mod/') < 0) {
@@ -457,63 +394,6 @@ export class CoreGradesHelperProvider {
         }
 
         return link;
-    }
-
-    /**
-     * Get a row from the grades table.
-     *
-     * @param table JSON object representing a table with data.
-     * @param gradeId Grade Object identifier.
-     * @returns Formatted HTML table.
-     * @deprecated since app 4.0
-     */
-    async getGradesTableRow(table: CoreGradesTable, gradeId: number): Promise<CoreGradesFormattedRow | null> {
-        if (table.tabledata) {
-            const selectedRow = table.tabledata.find(
-                (row) =>
-                    row.itemname &&
-                    row.itemname.id &&
-                    row.itemname.id.substring(0, 3) == 'row' &&
-                    parseInt(row.itemname.id.split('_')[1], 10) == gradeId,
-            );
-
-            if (selectedRow) {
-                return await this.formatGradeRow(selectedRow);
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Get the rows related to a module from the grades table.
-     *
-     * @param table JSON object representing a table with data.
-     * @param moduleId Grade Object identifier.
-     * @returns Formatted HTML table.
-     * @deprecated since app 4.0
-     */
-    async getModuleGradesTableRows(table: CoreGradesTable, moduleId: number): Promise<CoreGradesFormattedRow[]> {
-        if (!table.tabledata) {
-            return [];
-        }
-
-        // Find href containing "/mod/xxx/xxx.php".
-        const regex = /href="([^"]*\/mod\/[^"|^/]*\/[^"|^.]*\.php[^"]*)/;
-
-        return Promise.all(table.tabledata.filter((row) => {
-            if (row.itemname && row.itemname.content) {
-                const matches = row.itemname.content.match(regex);
-
-                if (matches && matches.length) {
-                    const hrefParams = CoreUrlUtils.extractUrlParams(matches[1]);
-
-                    return hrefParams && parseInt(hrefParams.id) === moduleId;
-                }
-            }
-
-            return false;
-        }).map((row) => this.formatGradeRow(row)));
     }
 
     /**
@@ -538,7 +418,7 @@ export class CoreGradesHelperProvider {
                 const matches = row.itemname.content.match(regex);
 
                 if (matches && matches.length) {
-                    const hrefParams = CoreUrlUtils.extractUrlParams(matches[1]);
+                    const hrefParams = CoreUrl.extractUrlParams(matches[1]);
 
                     return hrefParams && parseInt(hrefParams.id) === moduleId;
                 }
@@ -546,6 +426,24 @@ export class CoreGradesHelperProvider {
 
             return false;
         }));
+    }
+
+    /**
+     * Parse the penalty message from the grade HTML content.
+     *
+     * @param grade Grade to parse.
+     * @returns The penalty message or undefined if not found.
+     */
+    getPenaltyFromGrade(grade?: string): string | undefined {
+        if (!grade) {
+            return undefined;
+        }
+
+        const template = document.createElement('template');
+        template.innerHTML = grade;
+        const icon = template.content.querySelector<HTMLElement>('.penalty-indicator-icon');
+
+        return icon?.title;
     }
 
     /**
@@ -563,7 +461,7 @@ export class CoreGradesHelperProvider {
         moduleId?: number,
         siteId?: string,
     ): Promise<void> {
-        const modal = await CoreDomUtils.showModalLoading();
+        const modal = await CoreLoadings.show();
 
         const site = await CoreSites.getSite(siteId);
 
@@ -588,7 +486,7 @@ export class CoreGradesHelperProvider {
             // Open the item directly.
             const gradeId = item.id;
 
-            await CoreUtils.ignoreErrors(
+            await CorePromiseUtils.ignoreErrors(
                 CoreNavigator.navigateToSitePath(
                     `/${GRADES_PAGE_NAME}/${courseId}`,
                     { params: { gradeId }, siteId },
@@ -599,7 +497,7 @@ export class CoreGradesHelperProvider {
                 // Cannot get grade items or there's no need to.
                 if (userId && userId != currentUserId) {
                     // View another user grades. Open the grades page directly.
-                    await CoreUtils.ignoreErrors(
+                    await CorePromiseUtils.ignoreErrors(
                         CoreNavigator.navigateToSitePath(`/${GRADES_PAGE_NAME}/${courseId}`, { siteId }),
                     );
                 }
@@ -667,13 +565,17 @@ export class CoreGradesHelperProvider {
         text = text.replace('%2F', '/').replace('%2f', '/');
         if (text.indexOf('/agg_mean') > -1) {
             row.itemtype = 'agg_mean';
-            row.icon = 'moodle-agg_mean';
+            row.icon = 'moodle-agg-mean';
             row.iconAlt = Translate.instant('core.grades.aggregatemean');
         } else if (text.indexOf('/agg_sum') > -1) {
             row.itemtype = 'agg_sum';
-            row.icon = 'moodle-agg_sum';
+            row.icon = 'moodle-agg-sum';
             row.iconAlt = Translate.instant('core.grades.aggregatesum');
-        } else if (text.indexOf('/outcomes') > -1 || text.indexOf('fa-tasks') > -1 || text.indexOf('fa-list-check') > -1) {
+        } else if (
+            text.indexOf('/outcomes') > -1 ||
+            text.indexOf('fa-tasks') > -1 ||
+            text.indexOf('fa-list-check') > -1
+        ) {
             row.itemtype = 'outcome';
             row.icon = 'fas-list-check';
             row.iconAlt = Translate.instant('core.grades.outcome');
@@ -681,9 +583,14 @@ export class CoreGradesHelperProvider {
             row.itemtype = 'category';
             row.icon = 'fas-folder';
             row.iconAlt = Translate.instant('core.grades.category');
-        } else if (text.indexOf('/manual_item') > -1 || text.indexOf('fa-square-o') > -1) {
+        } else if (
+            text.indexOf('/manual_item') > -1 ||
+            text.indexOf('fa-square-o') > -1 ||
+            text.indexOf('fa-pencil-square-o') > -1 ||
+            text.indexOf('fa-pen-to-square') > -1
+        ) {
             row.itemtype = 'manual';
-            row.icon = 'far-square';
+            row.icon = 'fas-pen-to-square';
             row.iconAlt = Translate.instant('core.grades.manualitem');
         } else if (text.indexOf('/calc') > -1 || text.indexOf('fa-calculator') > -1) {
             row.itemtype = 'calc';
@@ -694,11 +601,11 @@ export class CoreGradesHelperProvider {
             const modname = module?.[1];
 
             if (modname !== undefined) {
-                const modicon = CoreDomUtils.convertToElement(text).querySelector('img')?.getAttribute('src') ?? undefined;
+                const modicon = convertTextToHTMLElement(text).querySelector('img')?.getAttribute('src') ?? undefined;
 
                 row.itemtype = 'mod';
                 row.itemmodule = modname;
-                row.iconAlt = CoreCourse.translateModuleName(row.itemmodule) || '';
+                row.iconAlt = CoreCourseModuleHelper.translateModuleName(row.itemmodule) || '';
                 row.image = await CoreCourseModuleDelegate.getModuleIconSrc(modname, modicon);
             }
         } else {
@@ -773,7 +680,7 @@ export class CoreGradesHelperProvider {
 
             for (let i = gradingType; i >= 0; i--) {
                 grades.push({
-                    label: i + ' / ' + gradingType,
+                    label: `${i} / ${gradingType}`,
                     value: i,
                 });
             }
@@ -807,11 +714,11 @@ export class CoreGradesHelperProvider {
         accessData: CoreCourseAccess,
         navOptions?: CoreCourseUserAdminOrNavOptionIndexed,
     ): Promise<boolean> {
-        if (accessData && accessData.type == CoreCourseProvider.ACCESS_GUEST) {
+        if (accessData && accessData.type === CoreCourseAccessDataType.ACCESS_GUEST) {
             return false; // Not enabled for guests.
         }
 
-        if (navOptions && navOptions.grades !== undefined) {
+        if (navOptions?.grades !== undefined) {
             return navOptions.grades;
         }
 
@@ -871,6 +778,7 @@ export type CoreGradesFormattedTableRow = CoreGradesFormattedRowCommonData & {
     gradeClass?: string;
     gradeIcon?: string;
     gradeIconAlt?: string;
+    penalty?: string;
 };
 
 export type CoreGradesFormattedTableColumn = {

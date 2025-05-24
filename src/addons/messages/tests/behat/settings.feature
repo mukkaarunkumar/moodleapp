@@ -1,4 +1,4 @@
-@core @core_message @app @javascript
+@addon_messages @app @core @core_message @javascript
 Feature: Test messages settings
 
   Background:

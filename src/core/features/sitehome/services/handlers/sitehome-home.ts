@@ -17,15 +17,14 @@ import { CoreSites } from '@services/sites';
 import { CoreMainMenuHomeHandler, CoreMainMenuHomeHandlerToDisplay } from '@features/mainmenu/services/home-delegate';
 import { CoreSiteHome } from '../sitehome';
 import { makeSingleton } from '@singletons';
-import { CoreSiteInfoUserHomepage } from '@classes/site';
+import { CoreSiteInfoUserHomepage } from '@classes/sites/unauthenticated-site';
+import { CORE_SITEHOME_PAGE_NAME } from '@features/sitehome/constants';
 
 /**
  * Handler to add site home into home page.
  */
 @Injectable({ providedIn: 'root' })
 export class CoreSiteHomeHomeHandlerService implements CoreMainMenuHomeHandler {
-
-    static readonly PAGE_NAME = 'site';
 
     name = 'CoreSiteHomeDashboard';
     priority = 1100;
@@ -61,7 +60,7 @@ export class CoreSiteHomeHomeHandlerService implements CoreMainMenuHomeHandler {
 
         return {
             title: 'core.sitehome.sitehome',
-            page: CoreSiteHomeHomeHandlerService.PAGE_NAME,
+            page: CORE_SITEHOME_PAGE_NAME,
             class: 'core-sitehome-dashboard-handler',
             icon: 'fas-house',
             priority: displaySiteHome ? this.priority + 200 : this.priority,

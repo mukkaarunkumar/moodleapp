@@ -14,18 +14,20 @@
 
 import { Injectable, Type } from '@angular/core';
 import { SafeUrl } from '@angular/platform-browser';
-import { IonRefresher } from '@ionic/angular';
 
-import { CoreSite } from '@classes/site';
+import { CoreSite } from '@classes/sites/site';
 import { CoreCourseModuleDefaultHandler } from './handlers/default-module';
 import { CoreDelegate, CoreDelegateHandler } from '@classes/delegate';
 import { CoreCourseAnyCourseData } from '@features/courses/services/courses';
-import { CoreCourse } from './course';
+import { CoreCourseModuleHelper } from './course-module-helper';
 import { CoreSites } from '@services/sites';
 import { makeSingleton } from '@singletons';
 import { CoreCourseModuleData } from './course-helper';
 import { CoreNavigationOptions } from '@services/navigator';
 import { CoreIonicColorNames } from '@singletons/colors';
+import { DownloadStatus } from '@/core/constants';
+import { CORE_COURSE_MODULE_FEATURE_PREFIX } from '../constants';
+import { ModFeature } from '@addons/mod/constants';
 
 /**
  * Interface that all course module handlers must implement.
@@ -41,7 +43,7 @@ export interface CoreCourseModuleHandler extends CoreDelegateHandler {
      * This is to replicate the "plugin_supports" function of Moodle.
      * If you need some dynamic checks please implement the supportsFeature function.
      */
-    supportedFeatures?: Record<string, unknown>;
+    supportedFeatures?: Partial<Record<ModFeature, unknown>>;
 
     /**
      * Get the data required to display the module in the course contents view.
@@ -93,6 +95,7 @@ export interface CoreCourseModuleHandler extends CoreDelegateHandler {
      * @param module Module to get the icon from.
      * @param modicon The mod icon string.
      * @returns Whether the icon should be treated as a shape.
+     * @deprecated since 4.3. Now it uses platform information. This function is not used anymore.
      */
     iconIsShape?(module?: CoreCourseModuleData, modicon?: string): Promise<boolean | undefined> | boolean | undefined;
 
@@ -103,7 +106,7 @@ export interface CoreCourseModuleHandler extends CoreDelegateHandler {
      * @param feature The feature to check.
      * @returns The result of the supports check.
      */
-    supportsFeature?(feature: string): unknown;
+    supportsFeature?(feature: ModFeature): unknown;
 
     /**
      * Return true to show the manual completion regardless of the course's showcompletionconditions setting.
@@ -123,6 +126,14 @@ export interface CoreCourseModuleHandler extends CoreDelegateHandler {
      * @returns Promise resolved when done.
      */
     openActivityPage(module: CoreCourseModuleData, courseId: number, options?: CoreNavigationOptions): Promise<void>;
+
+    /**
+     * Whether the activity is branded.
+     * This information is used, for instance, to decide if a filter should be applied to the icon or not.
+     *
+     * @returns bool True if the activity is branded, false otherwise.
+     */
+    isBranded?(): Promise<boolean>;
 }
 
 /**
@@ -156,6 +167,8 @@ export interface CoreCourseModuleHandlerData {
 
     /**
      * The color of the extra badge. Default: primary.
+     *
+     * @deprecated since 4.3 Not used anymore.
      */
     extraBadgeColor?: CoreIonicColorNames;
 
@@ -167,9 +180,24 @@ export interface CoreCourseModuleHandlerData {
     showDownloadButton?: boolean;
 
     /**
+     * Wether activity has the custom cmlist item flag enabled.
+     *
+     * Activities like label uses this flag to indicate that it should be
+     * displayed as a custom course item instead of a tipical activity card.
+     */
+    hasCustomCmListItem?: boolean;
+
+    /**
      * The buttons to display in the module item.
+     *
+     * @deprecated since 4.3 Use button instead. It will only display the first.
      */
     buttons?: CoreCourseModuleHandlerButton[];
+
+    /**
+     * The button to display in the module item.
+     */
+    button?: CoreCourseModuleHandlerButton;
 
     /**
      * Whether to display a spinner where the download button is displayed. The module icon, title, etc. will be displayed.
@@ -197,7 +225,7 @@ export interface CoreCourseModuleHandlerData {
      *
      * @param status Module status.
      */
-    updateStatus?(status: string): void;
+    updateStatus?(status: DownloadStatus): void;
 
     /**
      * On Destroy function in case it's needed.
@@ -216,7 +244,7 @@ export interface CoreCourseModuleMainComponent {
      * @param showErrors If show errors to the user of hide them.
      * @returns Promise resolved when done.
      */
-    doRefresh(refresher?: IonRefresher | null, showErrors?: boolean): Promise<void>;
+    doRefresh(refresher?: HTMLIonRefresherElement | null, showErrors?: boolean): Promise<void>;
 }
 
 /**
@@ -239,20 +267,6 @@ export interface CoreCourseModuleHandlerButton {
     hidden?: boolean;
 
     /**
-     * The name of the button icon to use in iOS instead of "icon".
-     *
-     * @deprecated since 3.9.5. Now the icon must be the same for all platforms.
-     */
-    iosIcon?: string;
-
-    /**
-     * The name of the button icon to use in MaterialDesign instead of "icon".
-     *
-     * @deprecated since 3.9.5. Now the icon must be the same for all platforms.
-     */
-    mdIcon?: string;
-
-    /**
      * Action to perform when the button is clicked.
      *
      * @param event The click event.
@@ -270,11 +284,11 @@ export interface CoreCourseModuleHandlerButton {
 @Injectable({ providedIn: 'root' })
 export class CoreCourseModuleDelegateService extends CoreDelegate<CoreCourseModuleHandler> {
 
-    protected featurePrefix = 'CoreCourseModuleDelegate_';
+    protected featurePrefix = CORE_COURSE_MODULE_FEATURE_PREFIX;
     protected handlerNameProperty = 'modName';
 
     constructor(protected defaultHandler: CoreCourseModuleDefaultHandler) {
-        super('CoreCourseModuleDelegate', true);
+        super('CoreCourseModuleDelegate');
     }
 
     /**
@@ -402,7 +416,7 @@ export class CoreCourseModuleDelegateService extends CoreDelegate<CoreCourseModu
     async getModuleIconSrc(modname: string, modicon?: string, module?: CoreCourseModuleData): Promise<string> {
         const icon = await this.executeFunctionOnEnabled<Promise<string>>(modname, 'getIconSrc', [module, modicon]);
 
-        return icon ?? CoreCourse.getModuleIconSrc(modname, modicon) ?? '';
+        return icon ?? CoreCourseModuleHelper.getModuleIconSrc(modname, modicon) ?? '';
     }
 
     /**
@@ -412,6 +426,7 @@ export class CoreCourseModuleDelegateService extends CoreDelegate<CoreCourseModu
      * @param modicon The mod icon string.
      * @param module The module to use.
      * @returns Whether the icon should be treated as a shape.
+     * @deprecated since 4.3. Now it uses platform information. This function is not used anymore.
      */
     async moduleIconIsShape(modname: string, modicon?: string, module?: CoreCourseModuleData): Promise<boolean | undefined> {
         return await this.executeFunctionOnEnabled<Promise<boolean>>(modname, 'iconIsShape', [module, modicon]);
@@ -425,7 +440,7 @@ export class CoreCourseModuleDelegateService extends CoreDelegate<CoreCourseModu
      * @param defaultValue Value to return if the module is not supported or doesn't know if it's supported.
      * @returns The result of the supports check.
      */
-    supportsFeature<T = unknown>(modname: string, feature: string, defaultValue: T): T {
+    supportsFeature<T = unknown>(modname: string, feature: ModFeature, defaultValue: T): T {
         const handler = this.enabledHandlers[modname];
         let result: T | undefined;
 

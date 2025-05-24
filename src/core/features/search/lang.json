@@ -1,7 +1,8 @@
 {
-    "allcourses": "All courses",
     "allcategories": "All categories",
+    "allcourses": "All courses",
     "empty": "What are you searching for?",
+    "err_minlength": "You must enter at least {{$a.format}} characters here.",
     "filtercategories": "Filter results by",
     "filtercourses": "Search in",
     "filterheader": "Filter",

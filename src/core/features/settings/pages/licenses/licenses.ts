@@ -16,11 +16,14 @@ import { Component, OnInit } from '@angular/core';
 import { CoreConstants } from '@/core/constants';
 import { Http } from '@singletons';
 import { IonSearchbar } from '@ionic/angular';
+import { firstValueFrom } from 'rxjs';
+import { CoreSharedModule } from '@/core/shared.module';
+import { CoreEditorService } from '@features/editor/services/editor';
 
 /**
  * Defines license info
  */
-interface CoreSettingsLicense {
+export interface CoreSettingsLicense {
     name: string;
     version: string;
     licenses: string | string[];
@@ -38,8 +41,14 @@ interface CoreSettingsLicense {
 @Component({
     selector: 'page-core-app-settings-licenses',
     templateUrl: 'licenses.html',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+    ],
 })
-export class CoreSettingsLicensesPage implements OnInit {
+export default class CoreSettingsLicensesPage implements OnInit {
+
+    protected static readonly LICENSES_PER_PAGE = 50;
 
     licensesUrl: string;
     loaded = false;
@@ -49,13 +58,14 @@ export class CoreSettingsLicensesPage implements OnInit {
     appLicenseVersion: string;
 
     protected allLicenses: CoreSettingsLicense[] = [];
+    protected filteredLicenses: CoreSettingsLicense[] = [];
 
     constructor() {
-        this.appLicenseVersion = CoreConstants.CONFIG.versionname.indexOf('-') > 0
+        this.appLicenseVersion = CoreConstants.BUILD.isDevelopment
             ? 'main'
-            : 'v' + CoreConstants.CONFIG.versionname;
+            : `v${CoreConstants.CONFIG.versionname}`;
 
-        this.licensesUrl = 'https://raw.githubusercontent.com/moodlehq/moodleapp/' + this.appLicenseVersion + '/licenses.json';
+        this.licensesUrl = `https://raw.githubusercontent.com/moodlehq/moodleapp/${this.appLicenseVersion}/licenses.json`;
     }
 
     /**
@@ -63,7 +73,7 @@ export class CoreSettingsLicensesPage implements OnInit {
      */
     async ngOnInit(): Promise<void> {
         try {
-            const licenses = await Http.get(this.licensesUrl).toPromise();
+            const licenses = await firstValueFrom(Http.get(this.licensesUrl));
             this.allLicenses = Object.keys(licenses).map((name) => {
                 const license = licenses[name];
 
@@ -78,13 +88,16 @@ export class CoreSettingsLicensesPage implements OnInit {
                     license.repository = license.repository.replace('git://', 'https://');
                     if (license.repository.indexOf('github.com') > 0) {
                         const version = license.name == 'moodlemobile' ? this.appLicenseVersion : license.version;
-                        license.licenseUrl = license.repository + '/blob/' + version + '/' + license.licenseFile;
+                        license.licenseUrl = `${license.repository}/blob/${version}/${license.licenseFile}`;
                     }
                 }
 
                 return license;
             });
 
+            this.allLicenses.push(...await CoreEditorService.getLicenseInformation());
+
+            this.allLicenses.sort((a, b) => a.name.localeCompare(b.name));
             this.filterLicenses();
 
             this.error = false;
@@ -102,18 +115,18 @@ export class CoreSettingsLicensesPage implements OnInit {
         const filter = this.textFilter.trim().toLowerCase();
 
         if (filter == '') {
-            this.licenses = this.allLicenses;
-
-            return;
+            this.filteredLicenses = this.allLicenses;
+        } else {
+            this.filteredLicenses = this.allLicenses.filter((license) => license.name.toLowerCase().indexOf(filter) >=0 ||
+                license.version.toLowerCase().indexOf(filter) >=0 ||
+                typeof license.licenses == 'string' && license.licenses.toLowerCase().indexOf(filter) >=0 ||
+                license.repository && license.repository.toLowerCase().indexOf(filter) >=0 ||
+                license.publisher && license.publisher.toLowerCase().indexOf(filter) >=0 ||
+                license.url && license.url.toLowerCase().indexOf(filter) >=0 ||
+                license.email && license.email.toLowerCase().indexOf(filter) >=0);
         }
 
-        this.licenses = this.allLicenses.filter((license) => license.name.toLowerCase().indexOf(filter) >=0 ||
-            license.version.toLowerCase().indexOf(filter) >=0 ||
-            typeof license.licenses == 'string' && license.licenses.toLowerCase().indexOf(filter) >=0 ||
-            license.repository && license.repository.toLowerCase().indexOf(filter) >=0 ||
-            license.publisher && license.publisher.toLowerCase().indexOf(filter) >=0 ||
-            license.url && license.url.toLowerCase().indexOf(filter) >=0 ||
-            license.email && license.email.toLowerCase().indexOf(filter) >=0);
+        this.licenses = this.filteredLicenses.slice(0, CoreSettingsLicensesPage.LICENSES_PER_PAGE);
     }
 
     /**
@@ -125,6 +138,24 @@ export class CoreSettingsLicensesPage implements OnInit {
         this.textFilter = target.value || '';
 
         this.filterLicenses();
+    }
+
+    get canLoadMore(): boolean {
+        return this.licenses.length < this.filteredLicenses.length;
+    }
+
+    /**
+     * Load more licenses.
+     *
+     * @param infiniteComplete Infinite scroll complete function. Only used from core-infinite-loading.
+     * @returns Resolved when done.
+     */
+    async loadMore(infiniteComplete?: () => void): Promise<void> {
+        const start = this.licenses.length;
+        const end = start + CoreSettingsLicensesPage.LICENSES_PER_PAGE;
+        this.licenses.push(...this.filteredLicenses.slice(start, end));
+
+        infiniteComplete?.();
     }
 
 }

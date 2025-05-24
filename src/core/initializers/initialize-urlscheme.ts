@@ -16,6 +16,9 @@ import { CoreCustomURLSchemes } from '@services/urlschemes';
 import { NgZone } from '@singletons';
 import { CoreEvents } from '@singletons/events';
 
+/**
+ * Asynchronous function to handle custom URLs when the app is launched.
+ */
 export default async function(): Promise<void> {
     const lastUrls: Record<string, number> = {};
 
@@ -39,7 +42,7 @@ export default async function(): Promise<void> {
 
             CoreEvents.trigger(CoreEvents.APP_LAUNCHED_URL, { url });
             CoreCustomURLSchemes.handleCustomURL(url).catch((error) => {
-                CoreCustomURLSchemes.treatHandleCustomURLError(error);
+                CoreCustomURLSchemes.treatHandleCustomURLError(error, url, 'handleOpenURL');
             });
         });
     };

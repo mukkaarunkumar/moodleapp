@@ -17,25 +17,29 @@ import { CoreListItemsManager } from '@classes/items-management/list-items-manag
 import { CoreRoutedItemsManagerSourcesTracker } from '@classes/items-management/routed-items-manager-sources-tracker';
 import { CoreReportBuilderReportsSource } from '@features/reportbuilder/classes/reports-source';
 import { CoreReportBuilder, CoreReportBuilderReport, REPORTS_LIST_LIMIT } from '@features/reportbuilder/services/reportbuilder';
-import { IonRefresher } from '@ionic/angular';
 import { CoreAnalytics, CoreAnalyticsEventType } from '@services/analytics';
 import { CoreNavigator } from '@services/navigator';
-import { CoreDomUtils } from '@services/utils/dom';
-import { CoreUtils } from '@services/utils/utils';
+import { CorePromiseUtils } from '@singletons/promise-utils';
 import { Translate } from '@singletons';
 import { CoreTime } from '@singletons/time';
 import { BehaviorSubject } from 'rxjs';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { CoreSharedModule } from '@/core/shared.module';
 
 @Component({
     selector: 'core-report-builder-list',
     templateUrl: './list.html',
     changeDetection: ChangeDetectionStrategy.OnPush,
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+    ],
 })
-export class CoreReportBuilderListPage implements AfterViewInit, OnDestroy {
+export default class CoreReportBuilderListPage implements AfterViewInit, OnDestroy {
 
     reports!: CoreListItemsManager<CoreReportBuilderReport, CoreReportBuilderReportsSource>;
 
-    state$: Readonly<BehaviorSubject<CoreReportBuilderListState>> = new BehaviorSubject({
+    state$: Readonly<BehaviorSubject<CoreReportBuilderListState>> = new BehaviorSubject<CoreReportBuilderListState>({
         page: 1,
         perpage: REPORTS_LIST_LIMIT,
         loaded: false,
@@ -51,7 +55,7 @@ export class CoreReportBuilderListPage implements AfterViewInit, OnDestroy {
             const source = CoreRoutedItemsManagerSourcesTracker.getOrCreateSource(CoreReportBuilderReportsSource, []);
             this.reports = new CoreListItemsManager(source, CoreReportBuilderListPage);
         } catch (error) {
-            CoreDomUtils.showErrorModal(error);
+            CoreAlerts.showError(error);
             CoreNavigator.back();
         }
     }
@@ -64,7 +68,7 @@ export class CoreReportBuilderListPage implements AfterViewInit, OnDestroy {
             await this.fetchReports(true);
             this.updateState({ loaded: true });
         } catch (error) {
-            CoreDomUtils.showErrorModalDefault(error, 'Error loading reports');
+            CoreAlerts.showError(error, { default: 'Error loading reports' });
 
             this.reports.reset();
         }
@@ -101,7 +105,7 @@ export class CoreReportBuilderListPage implements AfterViewInit, OnDestroy {
         try {
             await this.fetchReports(false);
         } catch (error) {
-            CoreDomUtils.showErrorModalDefault(error, 'Error loading more reports');
+            CoreAlerts.showError(error, { default: 'Error loading more reports' });
 
             this.updateState({ loadMoreError: true });
         }
@@ -114,9 +118,9 @@ export class CoreReportBuilderListPage implements AfterViewInit, OnDestroy {
      *
      * @param ionRefresher ionRefresher.
      */
-    async refreshReports(ionRefresher?: IonRefresher): Promise<void> {
-        await CoreUtils.ignoreErrors(CoreReportBuilder.invalidateReportsList());
-        await CoreUtils.ignoreErrors(this.fetchReports(true));
+    async refreshReports(ionRefresher?: HTMLIonRefresherElement): Promise<void> {
+        await CorePromiseUtils.ignoreErrors(CoreReportBuilder.invalidateReportsList());
+        await CorePromiseUtils.ignoreErrors(this.fetchReports(true));
         await ionRefresher?.complete();
     }
 

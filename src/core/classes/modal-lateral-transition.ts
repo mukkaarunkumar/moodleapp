@@ -27,7 +27,7 @@ export function CoreModalLateralTransitionEnter(baseEl: HTMLElement): Animation 
 
     const otherAnimations: Animation[] = [];
 
-    const backdrop = baseEl.querySelector('ion-backdrop');
+    const backdrop = baseEl.shadowRoot?.querySelector('ion-backdrop');
     if (backdrop) {
         const backdropAnimation = createAnimation()
             .addElement(backdrop)
@@ -36,11 +36,11 @@ export function CoreModalLateralTransitionEnter(baseEl: HTMLElement): Animation 
         otherAnimations.push(backdropAnimation);
     }
 
-    const wrapper = baseEl.querySelector('.modal-wrapper');
+    const wrapper = baseEl.shadowRoot?.querySelector('.modal-wrapper');
     if (wrapper) {
         const wrapperAnimation = createAnimation()
             .addElement(wrapper)
-            .fromTo('transform', 'translateX(' + OFF_RIGHT + ')', 'translateX(0)')
+            .fromTo('transform', `translateX(${OFF_RIGHT})`, 'translateX(0)')
             .fromTo('opacity', 0.8, 1);
 
         otherAnimations.push(wrapperAnimation);
@@ -64,7 +64,7 @@ export function CoreModalLateralTransitionLeave(baseEl: HTMLElement): Animation 
 
     const otherAnimations: Animation[] = [];
 
-    const backdrop = baseEl.querySelector('ion-backdrop');
+    const backdrop = baseEl.shadowRoot?.querySelector('ion-backdrop');
     if (backdrop) {
         const backdropAnimation = createAnimation()
             .addElement(backdrop)
@@ -73,12 +73,12 @@ export function CoreModalLateralTransitionLeave(baseEl: HTMLElement): Animation 
         otherAnimations.push(backdropAnimation);
     }
 
-    const wrapper = baseEl.querySelector('.modal-wrapper');
+    const wrapper = baseEl.shadowRoot?.querySelector('.modal-wrapper');
     if (wrapper) {
         const wrapperAnimation = createAnimation()
             .addElement(wrapper)
             .beforeStyles({ opacity: 1 })
-            .fromTo('transform', 'translateX(0)', 'translateX(' + OFF_RIGHT + ')');
+            .fromTo('transform', 'translateX(0)', `translateX(${OFF_RIGHT})`);
 
         otherAnimations.push(wrapperAnimation);
     }

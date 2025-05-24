@@ -13,16 +13,22 @@
 // limitations under the License.
 
 import { Component, OnDestroy, OnInit } from '@angular/core';
-import { IonRefresher } from '@ionic/angular';
 import { CoreSites } from '@services/sites';
-import { CoreDomUtils } from '@services/utils/dom';
-import { CoreUtils } from '@services/utils/utils';
-import { CoreCategoryData, CoreCourseListItem, CoreCourses, CoreCoursesProvider } from '../../services/courses';
+import { CoreUtils } from '@singletons/utils';
+import { CoreCategoryData, CoreCourseListItem, CoreCourses } from '../../services/courses';
 import { Translate } from '@singletons';
 import { CoreNavigator } from '@services/navigator';
 import { CoreEventObserver, CoreEvents } from '@singletons/events';
 import { CoreAnalytics, CoreAnalyticsEventType } from '@services/analytics';
 import { CoreTime } from '@singletons/time';
+import {
+    CORE_COURSES_MY_COURSES_UPDATED_EVENT,
+    CoreCoursesMyCoursesUpdatedEventAction,
+    CORE_COURSES_DASHBOARD_DOWNLOAD_ENABLED_CHANGED_EVENT,
+} from '@features/courses/constants';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { CoreCoursesCourseListItemComponent } from '../../components/course-list-item/course-list-item';
+import { CoreSharedModule } from '@/core/shared.module';
 
 /**
  * Page that displays a list of categories and the courses in the current category if any.
@@ -30,8 +36,13 @@ import { CoreTime } from '@singletons/time';
 @Component({
     selector: 'page-core-courses-categories',
     templateUrl: 'categories.html',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+        CoreCoursesCourseListItemComponent,
+    ],
 })
-export class CoreCoursesCategoriesPage implements OnInit, OnDestroy {
+export default class CoreCoursesCategoriesPage implements OnInit, OnDestroy {
 
     title: string;
     currentCategory?: CoreCategoryData;
@@ -60,9 +71,9 @@ export class CoreCoursesCategoriesPage implements OnInit, OnDestroy {
 
         // Update list if user enrols in a course.
         this.myCoursesObserver = CoreEvents.on(
-            CoreCoursesProvider.EVENT_MY_COURSES_UPDATED,
+            CORE_COURSES_MY_COURSES_UPDATED_EVENT,
             (data) => {
-                if (data.action == CoreCoursesProvider.ACTION_ENROL) {
+                if (data.action === CoreCoursesMyCoursesUpdatedEventAction.ENROL) {
                     this.fetchCategories();
                 }
             },
@@ -78,7 +89,7 @@ export class CoreCoursesCategoriesPage implements OnInit, OnDestroy {
             this.downloadEnabled = (this.downloadCourseEnabled || this.downloadCoursesEnabled) && this.downloadEnabled;
         }, this.currentSiteId);
 
-        this.downloadEnabledObserver = CoreEvents.on(CoreCoursesProvider.EVENT_DASHBOARD_DOWNLOAD_ENABLED_CHANGED, (data) => {
+        this.downloadEnabledObserver = CoreEvents.on(CORE_COURSES_DASHBOARD_DOWNLOAD_ENABLED_CHANGED_EVENT, (data) => {
             this.downloadEnabled = (this.downloadCourseEnabled || this.downloadCoursesEnabled) && data.enabled;
         });
 
@@ -88,7 +99,7 @@ export class CoreCoursesCategoriesPage implements OnInit, OnDestroy {
                 ws: 'core_course_get_categories',
                 name: this.title,
                 data: { categoryid: this.categoryId, category: 'course' },
-                url: '/course/index.php' + (this.categoryId > 0 ? `?categoryid=${this.categoryId}` : ''),
+                url: `/course/index.php${this.categoryId > 0 ? `?categoryid=${this.categoryId}` : ''}`,
             });
         });
     }
@@ -148,13 +159,15 @@ export class CoreCoursesCategoriesPage implements OnInit, OnDestroy {
                     this.categoryCourses = await CoreCourses.getCoursesByField('category', this.categoryId);
                     await this.filterEnrolled();
                 } catch (error) {
-                    !this.isDestroyed && CoreDomUtils.showErrorModalDefault(error, 'core.courses.errorloadcourses', true);
+                    !this.isDestroyed && CoreAlerts.showError(error, {
+                        default: Translate.instant('core.courses.errorloadcourses'),
+                    });
                 }
             }
 
             this.logView();
         } catch (error) {
-            !this.isDestroyed && CoreDomUtils.showErrorModalDefault(error, 'core.courses.errorloadcategories', true);
+            !this.isDestroyed && CoreAlerts.showError(error, { default: Translate.instant('core.courses.errorloadcategories') });
         }
     }
 
@@ -163,7 +176,7 @@ export class CoreCoursesCategoriesPage implements OnInit, OnDestroy {
      *
      * @param refresher Refresher.
      */
-    refreshCategories(refresher?: IonRefresher): void {
+    refreshCategories(refresher?: HTMLIonRefresherElement): void {
         const promises: Promise<void>[] = [];
 
         promises.push(CoreCourses.invalidateUserCourses());
@@ -185,7 +198,7 @@ export class CoreCoursesCategoriesPage implements OnInit, OnDestroy {
      */
     openCategory(categoryId: number): void {
         CoreNavigator.navigateToSitePath(
-            'courses/categories/' + categoryId,
+            `courses/categories/${categoryId}`,
             { params: {
                 enrolled: this.showOnlyEnrolled,
             } },

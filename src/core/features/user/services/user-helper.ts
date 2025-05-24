@@ -17,7 +17,8 @@ import { CoreNavigator } from '@services/navigator';
 import { CoreSites } from '@services/sites';
 
 import { makeSingleton, Translate } from '@singletons';
-import { CoreUserProfile, CoreUserRole } from './user';
+import { CoreUser, CoreUserProfile, CoreUserRole } from './user';
+import { CoreTime } from '@singletons/time';
 
 /**
  * Service that provides some features regarding users information.
@@ -32,6 +33,7 @@ export class CoreUserHelperProvider {
      * @param city City.
      * @param country Country.
      * @returns Formatted address.
+     * @deprecated since 4.3. Not used anymore.
      */
     formatAddress(address?: string, city?: string, country?: string): string {
         const separator = Translate.instant('core.listsep');
@@ -39,7 +41,7 @@ export class CoreUserHelperProvider {
 
         values = values.filter((value) => value && value.length > 0);
 
-        return values.join(separator + ' ');
+        return values.join(`${separator} `);
     }
 
     /**
@@ -56,10 +58,10 @@ export class CoreUserHelperProvider {
         const separator = Translate.instant('core.listsep');
 
         return roles.map((value) => {
-            const translation = Translate.instant('core.user.' + value.shortname);
+            const translation = Translate.instant(`core.user.${value.shortname}`);
 
             return translation.indexOf('core.user.') < 0 ? translation : value.shortname;
-        }).join(separator + ' ');
+        }).join(`${separator} `);
     }
 
     /**
@@ -87,7 +89,8 @@ export class CoreUserHelperProvider {
      * Get the user initials.
      *
      * @param user User object.
-     * @returns Promise resolved with the user data.
+     * @returns User initials.
+     * @deprecated since 4.4. Use getUserInitialsFromParts instead.
      */
     getUserInitials(user: Partial<CoreUserProfile>): string {
         if (!user.firstname && !user.lastname) {
@@ -98,6 +101,49 @@ export class CoreUserHelperProvider {
         return (user.firstname?.charAt(0) || '') + (user.lastname?.charAt(0) || '');
     }
 
+    /**
+     * Get the user initials.
+     *
+     * @param parts User name parts. Containing firstname, lastname, fullname and userId.
+     * @returns User initials.
+     */
+    async getUserInitialsFromParts(parts: CoreUserNameParts): Promise<string> {
+        if (!parts.firstname && !parts.lastname) {
+            if (!parts.fullname && parts.userId) {
+                const user = await CoreUser.getProfile(parts.userId, undefined, true);
+                parts.fullname = user.fullname || '';
+            }
+
+            if (parts.fullname) {
+                const split = parts.fullname.split(' ');
+
+                parts.firstname = split[0];
+                if (split.length > 1) {
+                    parts.lastname = split[split.length - 1];
+                }
+            }
+        }
+
+        if (!parts.firstname && !parts.lastname) {
+            return 'UNK';
+        }
+
+        return (parts.firstname?.charAt(0) || '') + (parts.lastname?.charAt(0) || '');
+    }
+
+    /**
+     * Translates legacy timezone names.
+     *
+     * @param tz Timezone name.
+     * @returns Readable timezone name.
+     * @deprecated since 5.0. Use CoreTime.translateLegacyTimezone instead.
+     */
+    translateLegacyTimezone(tz: string): string {
+        return CoreTime.translateLegacyTimezone(tz);
+    }
+
 }
 
 export const CoreUserHelper = makeSingleton(CoreUserHelperProvider);
+
+type CoreUserNameParts = { firstname?: string; lastname?: string; fullname?: string; userId?: number };

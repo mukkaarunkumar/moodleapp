@@ -58,24 +58,6 @@ export interface CoreCourseFormatHandler extends CoreDelegateHandler {
     displayBlocks?(course: CoreCourseAnyCourseData): boolean;
 
     /**
-     * Whether the option to enable section/module download should be displayed.
-     *
-     * @deprecated on 4.0 Not used anymore because prefetch has been moved to storage manager.
-     * @param course The course to check.
-     * @returns Whether the option to enable section/module download should be displayed.
-     */
-    displayEnableDownload?(course: CoreCourseAnyCourseData): boolean;
-
-    /**
-     * Whether the default course index should be displayed. Defaults to true.
-     *
-     * @deprecated on 4.0. Please use displayCourseIndex instead.
-     * @param course The course to check.
-     * @returns Whether the default course index should be displayed.
-     */
-    displaySectionSelector?(course: CoreCourseAnyCourseData): boolean;
-
-    /**
      * Whether the default section selector should be displayed. Defaults to true.
      *
      * @param course The course to check.
@@ -160,7 +142,6 @@ export interface CoreCourseFormatHandler extends CoreDelegateHandler {
      *
      * @param course The course to get the title.
      * @param sections List of sections.
-     * @returns Promise resolved when the data is invalidated.
      */
     invalidateData?(course: CoreCourseAnyCourseData, sections: CoreCourseWSSection[]): Promise<void>;
 
@@ -184,7 +165,7 @@ export class CoreCourseFormatDelegateService extends CoreDelegate<CoreCourseForm
     protected handlerNameProperty = 'format';
 
     constructor(protected defaultHandler: CoreCourseFormatDefaultHandler) {
-        super('CoreCoursesCourseFormatDelegate', true);
+        super('CoreCoursesCourseFormatDelegate');
     }
 
     /**
@@ -293,7 +274,7 @@ export class CoreCourseFormatDelegateService extends CoreDelegate<CoreCourseForm
                 [course, sections],
             );
 
-            if (sectionData && 'forceSelected' in sectionData) {
+            if (sectionData && typeof sectionData === 'object' && 'forceSelected' in sectionData) {
                 return sectionData;
             } else if (sectionData) {
                 // Function just returned the section, don't force selecting it.
@@ -346,7 +327,6 @@ export class CoreCourseFormatDelegateService extends CoreDelegate<CoreCourseForm
      *
      * @param course The course to get the title.
      * @param sections List of sections.
-     * @returns Promise resolved when the data is invalidated.
      */
     async invalidateData(course: CoreCourseAnyCourseData, sections: CoreCourseWSSection[]): Promise<void> {
         await this.executeFunctionOnEnabled(course.format || '', 'invalidateData', [course, sections]);

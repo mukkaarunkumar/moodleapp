@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { AddonModAssign, AddonModAssignProvider } from '@addons/mod/assign/services/assign';
+import { AddonModAssign } from '@addons/mod/assign/services/assign';
 import { AddonModAssignHelper } from '@addons/mod/assign/services/assign-helper';
 import { AddonModAssignOffline } from '@addons/mod/assign/services/assign-offline';
 import { Component, OnInit } from '@angular/core';
 import { CoreFileUploaderStoreFilesResult } from '@features/fileuploader/services/fileuploader';
 import { CoreFileSession } from '@services/file-session';
-import { CoreUtils } from '@services/utils/utils';
-import { AddonModAssignSubmissionFileHandlerService } from '../services/handler';
-import { FileEntry } from '@ionic-native/file/ngx';
+import { CorePromiseUtils } from '@singletons/promise-utils';
+import { FileEntry } from '@awesome-cordova-plugins/file/ngx';
 import { AddonModAssignSubmissionPluginBaseComponent } from '@addons/mod/assign/classes/base-submission-plugin-component';
 import { CoreFileEntry } from '@services/file-helper';
+import { ADDON_MOD_ASSIGN_COMPONENT_LEGACY } from '@addons/mod/assign/constants';
+import { CoreSharedModule } from '@/core/shared.module';
+import { ADDON_MOD_ASSIGN_SUBMISSION_FILE_FOLDER_NAME } from '../constants';
 
 /**
  * Component to render a file submission plugin.
@@ -30,10 +32,14 @@ import { CoreFileEntry } from '@services/file-helper';
 @Component({
     selector: 'addon-mod-assign-submission-file',
     templateUrl: 'addon-mod-assign-submission-file.html',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+    ],
 })
 export class AddonModAssignSubmissionFileComponent extends AddonModAssignSubmissionPluginBaseComponent implements OnInit {
 
-    component = AddonModAssignProvider.COMPONENT;
+    component = ADDON_MOD_ASSIGN_COMPONENT_LEGACY;
     files: CoreFileEntry[] = [];
 
     maxSize?: number;
@@ -53,21 +59,22 @@ export class AddonModAssignSubmissionFileComponent extends AddonModAssignSubmiss
             : undefined;
 
         // Get the offline data.
-        const filesData = await CoreUtils.ignoreErrors(
+        const offlineData = await CorePromiseUtils.ignoreErrors(
             AddonModAssignOffline.getSubmission(this.assign.id),
             undefined,
         );
 
         try {
-            if (filesData && filesData.plugindata && filesData.plugindata.files_filemanager) {
-                const offlineDataFiles = <CoreFileUploaderStoreFilesResult>filesData.plugindata.files_filemanager;
+            // Offline submission, get files if submission is not removed.
+            if (offlineData?.plugindata?.files_filemanager) {
+                const offlineDataFiles = <CoreFileUploaderStoreFilesResult>offlineData.plugindata.files_filemanager;
                 // It has offline data.
                 let offlineFiles: FileEntry[] = [];
                 if (offlineDataFiles.offline) {
-                    offlineFiles = <FileEntry[]>await CoreUtils.ignoreErrors(
+                    offlineFiles = <FileEntry[]>await CorePromiseUtils.ignoreErrors(
                         AddonModAssignHelper.getStoredSubmissionFiles(
                             this.assign.id,
-                            AddonModAssignSubmissionFileHandlerService.FOLDER_NAME,
+                            ADDON_MOD_ASSIGN_SUBMISSION_FILE_FOLDER_NAME,
                         ),
                         [],
                     );

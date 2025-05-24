@@ -12,25 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { ContextLevel } from '@/core/constants';
+import { ContextLevel, CoreCacheUpdateFrequency } from '@/core/constants';
 import { Injectable } from '@angular/core';
-import { CoreSiteWSPreSets, CoreSite } from '@classes/site';
+import { CoreSite } from '@classes/sites/site';
 import { CoreUser } from '@features/user/services/user';
 import { CoreNetwork } from '@services/network';
 import { CoreSites } from '@services/sites';
-import { CoreUtils } from '@services/utils/utils';
 import { CoreWSExternalWarning } from '@services/ws';
 import { makeSingleton } from '@singletons';
 import { CoreEvents } from '@singletons/events';
 import { CoreRatingOffline } from './rating-offline';
-
-const ROOT_CACHE_KEY = 'CoreRating:';
+import { CoreSiteWSPreSets } from '@classes/sites/authenticated-site';
+import { CoreWSError } from '@classes/errors/wserror';
+import { CoreObject } from '@singletons/object';
 
 /**
  * Service to handle ratings.
  */
 @Injectable( { providedIn: 'root' })
 export class CoreRatingProvider {
+
+    protected static readonly ROOT_CACHE_KEY = 'CoreRating:';
 
     static readonly AGGREGATE_NONE = 0; // No ratings.
     static readonly AGGREGATE_AVERAGE = 1;
@@ -43,16 +45,6 @@ export class CoreRatingProvider {
 
     static readonly AGGREGATE_CHANGED_EVENT = 'core_rating_aggregate_changed';
     static readonly RATING_SAVED_EVENT = 'core_rating_rating_saved';
-
-    /**
-     * Returns whether the web serivce to add ratings is available.
-     *
-     * @returns If WS is available.
-     * @deprecated since app 4.0
-     */
-    isAddRatingWSAvailable(): boolean {
-        return true;
-    }
 
     /**
      * Add a rating to an item.
@@ -137,7 +129,7 @@ export class CoreRatingProvider {
 
             return response;
         } catch (error) {
-            if (CoreUtils.isWebServiceError(error)) {
+            if (CoreWSError.isWebServiceError(error)) {
                 // The WebService has thrown an error or offline not supported, reject.
                 return Promise.reject(error);
             }
@@ -246,7 +238,7 @@ export class CoreRatingProvider {
 
         const preSets: CoreSiteWSPreSets = {
             cacheKey: this.getItemRatingsCacheKey(contextLevel, instanceId, component, ratingArea, itemId, scaleId, sort),
-            updateFrequency: CoreSite.FREQUENCY_RARELY,
+            updateFrequency: CoreCacheUpdateFrequency.RARELY,
         };
 
         if (ignoreCache) {
@@ -256,7 +248,7 @@ export class CoreRatingProvider {
 
         const response = await site.read<CoreRatingGetItemRatingsWSResponse>('core_rating_get_item_ratings', params, preSets);
 
-        if (!site.isVersionGreaterEqualThan([' 3.6.5', '3.7.1', '3.8'])) {
+        if (!site.isVersionGreaterEqualThan(['3.6.5', '3.7.1', '3.8'])) {
             // MDL-65042 We need to fetch profiles because the returned profile pictures are incorrect.
             const promises = response.ratings.map((rating: CoreRatingItemRating) =>
                 CoreUser.getProfile(rating.userid, courseId, true, site.id).then((user) => {
@@ -285,7 +277,6 @@ export class CoreRatingProvider {
      * @param scaleId Scale id.
      * @param sort Sort field.
      * @param siteId Site ID. If not defined, current site.
-     * @returns Promise resolved when the data is invalidated.
      */
     async invalidateRatingItems(
         contextLevel: ContextLevel,
@@ -359,8 +350,8 @@ export class CoreRatingProvider {
         });
 
         if (result) {
-            result.scales = CoreUtils.objectToArray(scales);
-            result.ratings = CoreUtils.objectToArray(ratings);
+            result.scales = CoreObject.toArray(scales);
+            result.ratings = CoreObject.toArray(ratings);
         }
 
         return result;
@@ -407,7 +398,7 @@ export class CoreRatingProvider {
 
         const ratingsResults = await Promise.all(promises);
 
-        if (!site.isVersionGreaterEqualThan([' 3.6.5', '3.7.1', '3.8'])) {
+        if (!site.isVersionGreaterEqualThan(['3.6.5', '3.7.1', '3.8'])) {
             const ratings: CoreRatingItemRating[] = [].concat.apply([], ratingsResults);
 
             const userIds = ratings.map((rating) => rating.userid);
@@ -437,7 +428,8 @@ export class CoreRatingProvider {
         scaleId: number,
         sort: string,
     ): string {
-        return `${ROOT_CACHE_KEY}${contextLevel}:${instanceId}:${component}:${ratingArea}:${itemId}:${scaleId}:${sort}`;
+        return `${CoreRatingProvider.ROOT_CACHE_KEY}${contextLevel}:${instanceId}:` +
+            `${component}:${ratingArea}:${itemId}:${scaleId}:${sort}`;
     }
 
 }

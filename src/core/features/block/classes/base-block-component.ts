@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { OnInit, Input, Component, Optional, Inject } from '@angular/core';
+import { OnInit, Input, Component, Optional, Inject, OnChanges, SimpleChanges } from '@angular/core';
 import { CoreLogger } from '@singletons/logger';
-import { CoreDomUtils } from '@services/utils/dom';
-import { CoreUtils } from '@services/utils/utils';
-import { CoreTextUtils } from '@services/utils/text';
+import { CoreArray } from '@singletons/array';
+import { CoreText } from '@singletons/text';
 import { CoreCourseBlock } from '../../course/services/course';
 import { Params } from '@angular/router';
 import { ContextLevel } from '@/core/constants';
 import { CoreNavigationOptions } from '@services/navigator';
 import { AsyncDirective } from '@classes/async-directive';
 import { CorePromisedValue } from '@classes/promised-value';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { Translate } from '@singletons';
 
 /**
  * Template class to easily create components for blocks.
@@ -30,12 +31,12 @@ import { CorePromisedValue } from '@classes/promised-value';
 @Component({
     template: '',
 })
-export abstract class CoreBlockBaseComponent implements OnInit, ICoreBlockComponent, AsyncDirective {
+export abstract class CoreBlockBaseComponent implements OnInit, OnChanges, ICoreBlockComponent, AsyncDirective {
 
-    @Input() title!: string; // The block title.
-    @Input() block!: CoreCourseBlock; // The block to render.
-    @Input() contextLevel!: ContextLevel; // The context where the block will be used.
-    @Input() instanceId!: number; // The instance ID associated with the context level.
+    @Input({ required: true }) title!: string; // The block title.
+    @Input({ required: true }) block!: CoreCourseBlock; // The block to render.
+    @Input({ required: true }) contextLevel!: ContextLevel; // The context where the block will be used.
+    @Input({ required: true }) instanceId!: number; // The instance ID associated with the context level.
     @Input() link?: string; // Link to go when clicked.
     @Input() linkParams?: Params; // Link params to go when clicked.
     @Input() navOptions?: CoreNavigationOptions; // Navigation options.
@@ -54,15 +55,31 @@ export abstract class CoreBlockBaseComponent implements OnInit, ICoreBlockCompon
      * @inheritdoc
      */
     async ngOnInit(): Promise<void> {
-        if (this.block.configs && this.block.configs.length > 0) {
-            this.block.configs.forEach((config) => {
-                config.value = CoreTextUtils.parseJSON(config.value);
-            });
+        await this.loadContent();
+    }
 
-            this.block.configsRecord = CoreUtils.arrayToObject(this.block.configs, 'name');
+    /**
+     * @inheritdoc
+     */
+    ngOnChanges(changes: SimpleChanges): void {
+        if (changes.block) {
+            this.parseConfigs();
+        }
+    }
+
+    /**
+     * Parse configs if needed.
+     */
+    protected parseConfigs(): void {
+        if (!this.block.configs?.length || this.block.configsRecord) {
+            return;
         }
 
-        await this.loadContent();
+        this.block.configs.forEach((config) => {
+            config.value = CoreText.parseJSON(config.value);
+        });
+
+        this.block.configsRecord = CoreArray.toObject(this.block.configs, 'name');
     }
 
     /**
@@ -106,7 +123,7 @@ export abstract class CoreBlockBaseComponent implements OnInit, ICoreBlockCompon
             this.logger.error(error);
 
             // Error getting data, fail.
-            CoreDomUtils.showErrorModalDefault(error, this.fetchContentDefaultError, true);
+            CoreAlerts.showError(error, { default: Translate.instant(this.fetchContentDefaultError) });
         }
 
         this.loaded = true;

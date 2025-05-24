@@ -13,12 +13,15 @@
 // limitations under the License.
 
 import { Component, OnInit } from '@angular/core';
+import { CoreAccountsList, CoreLoginHelper } from '@features/login/services/login-helper';
 import { CoreSharedFilesHelper } from '@features/sharedfiles/services/sharedfiles-helper';
-import { FileEntry } from '@ionic-native/file/ngx';
+import { FileEntry } from '@awesome-cordova-plugins/file/ngx';
 import { CoreFile } from '@services/file';
 import { CoreNavigator } from '@services/navigator';
-import { CoreSiteBasicInfo, CoreSites } from '@services/sites';
-import { CoreDomUtils } from '@services/utils/dom';
+import { CoreSiteBasicInfo } from '@services/sites';
+import { CoreFileUtils } from '@singletons/file-utils';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { CoreSharedModule } from '@/core/shared.module';
 
 /**
  * Page to display the list of sites to choose one to store a shared file.
@@ -26,12 +29,20 @@ import { CoreDomUtils } from '@services/utils/dom';
 @Component({
     selector: 'page-core-shared-files-choose-site',
     templateUrl: 'choose-site.html',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+    ],
 })
-export class CoreSharedFilesChooseSitePage implements OnInit {
+export default class CoreSharedFilesChooseSitePage implements OnInit {
 
     fileName?: string;
-    sites?: CoreSiteBasicInfo[];
     loaded = false;
+    accountsList: CoreAccountsList = {
+        sameSite: [],
+        otherSites: [],
+        count: 0,
+    };
 
     protected filePath?: string;
     protected fileEntry?: FileEntry;
@@ -45,14 +56,14 @@ export class CoreSharedFilesChooseSitePage implements OnInit {
             this.filePath = CoreNavigator.getRequiredRouteParam('filePath');
             this.isInbox = !!CoreNavigator.getRouteBooleanParam('isInbox');
         } catch (error) {
-            CoreDomUtils.showErrorModalDefault(error, 'Error reading file.');
+            CoreAlerts.showError(error, { default: 'Error reading file.' });
             CoreNavigator.back();
 
             return;
         }
 
         if (this.filePath) {
-            const fileAndDir = CoreFile.getFileAndDirectoryFromPath(this.filePath);
+            const fileAndDir = CoreFileUtils.getFileAndDirectoryFromPath(this.filePath);
             this.fileName = fileAndDir.name;
         }
 
@@ -62,7 +73,7 @@ export class CoreSharedFilesChooseSitePage implements OnInit {
                 this.loadSites(),
             ]);
         } catch {
-            CoreDomUtils.showErrorModal('Error reading file.');
+            CoreAlerts.showError('Error reading file.');
             CoreNavigator.back();
         } finally {
             this.loaded = true;
@@ -89,15 +100,15 @@ export class CoreSharedFilesChooseSitePage implements OnInit {
      * @returns Promise resolved when done.
      */
     protected async loadSites(): Promise<void> {
-        this.sites = await CoreSites.getSites();
+        this.accountsList = await CoreLoginHelper.getAccountsList();
     }
 
     /**
      * Store the file in a certain site.
      *
-     * @param siteId Site ID.
+     * @param site Site.
      */
-    async storeInSite(siteId: string): Promise<void> {
+    async storeInSite(site: CoreSiteBasicInfo): Promise<void> {
         if (!this.fileEntry) {
             return;
         }
@@ -105,7 +116,7 @@ export class CoreSharedFilesChooseSitePage implements OnInit {
         this.loaded = false;
 
         try {
-            await CoreSharedFilesHelper.storeSharedFileInSite(this.fileEntry, siteId, this.isInbox);
+            await CoreSharedFilesHelper.storeSharedFileInSite(this.fileEntry, site.id, this.isInbox);
 
             CoreNavigator.back();
         } finally {

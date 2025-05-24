@@ -15,14 +15,12 @@
 import { Component, OnInit, OnDestroy, ViewChild, ElementRef } from '@angular/core';
 import { FormBuilder, FormGroup, Validators } from '@angular/forms';
 
-import { CoreApp } from '@services/app';
 import { CoreNetwork } from '@services/network';
 import { CoreSiteBasicInfo, CoreSites, CoreSitesReadingStrategy } from '@services/sites';
-import { CoreDomUtils } from '@services/utils/dom';
-import { CoreUtils } from '@services/utils/utils';
+import { CorePromiseUtils } from '@singletons/promise-utils';
 import { CoreLoginHelper } from '@features/login/services/login-helper';
-import { CoreSite, CoreSitePublicConfigResponse } from '@classes/site';
-import { CoreEvents } from '@singletons/events';
+import { CoreSite } from '@classes/sites/site';
+import { CoreEventObserver, CoreEvents } from '@singletons/events';
 import { CoreError } from '@classes/errors/error';
 import { CoreNavigator, CoreRedirectPayload } from '@services/navigator';
 import { CoreForms } from '@singletons/form';
@@ -31,6 +29,16 @@ import { CoreUserSupportConfig } from '@features/user/classes/support/support-co
 import { CoreUserAuthenticatedSupportConfig } from '@features/user/classes/support/authenticated-support-config';
 import { Translate } from '@singletons';
 import { SafeHtml } from '@angular/platform-browser';
+import { CoreSitePublicConfigResponse } from '@classes/sites/unauthenticated-site';
+import { ALWAYS_SHOW_LOGIN_FORM_CHANGED, FORGOTTEN_PASSWORD_FEATURE_NAME } from '@features/login/constants';
+import { CoreKeyboard } from '@singletons/keyboard';
+import { CoreLoadings } from '@services/overlays/loadings';
+import { CoreLoginMethodsComponent, CoreLoginMethodsCurrentLogin } from '@features/login/components/login-methods/login-methods';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { CoreSharedModule } from '@/core/shared.module';
+import { CoreSiteLogoComponent } from '../../../../components/site-logo/site-logo';
+import { CoreLoginExceededAttemptsComponent } from '../../components/exceeded-attempts/exceeded-attempts';
+import { CoreLoginIdentityProviderComponent } from '../../components/identity-provider/identity-provider';
 
 /**
  * Page to enter the user password to reconnect to a site.
@@ -38,33 +46,55 @@ import { SafeHtml } from '@angular/platform-browser';
 @Component({
     selector: 'page-core-login-reconnect',
     templateUrl: 'reconnect.html',
-    styleUrls: ['../../login.scss'],
+    styleUrl: '../../login.scss',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+        CoreSiteLogoComponent,
+        CoreLoginExceededAttemptsComponent,
+        CoreLoginIdentityProviderComponent,
+        CoreLoginMethodsComponent,
+    ],
 })
-export class CoreLoginReconnectPage implements OnInit, OnDestroy {
+export default class CoreLoginReconnectPage implements OnInit, OnDestroy {
 
     @ViewChild('reconnectForm') formElement?: ElementRef;
+    @ViewChild(CoreLoginMethodsComponent) set loginMethods(loginMethods: CoreLoginMethodsComponent) {
+        if (loginMethods && !this.currentLogin) {
+            loginMethods.getCurrentLogin().then(login => {
+                this.currentLogin = login;
+
+                return;
+            }).catch(() => {
+                // Ignore errors.
+            });
+        }
+    }
 
     credForm: FormGroup;
-    siteUrl!: string;
-    logoUrl?: string;
+    site!: CoreSite;
+    displaySiteUrl = false;
     showForgottenPassword = true;
     showUserAvatar = false;
     isBrowserSSO = false;
+    currentLogin?: CoreLoginMethodsCurrentLogin;
     isLoggedOut: boolean;
     siteId!: string;
     siteInfo?: CoreSiteBasicInfo;
-    showScanQR = false;
     showLoading = true;
     reconnectAttempts = 0;
     supportConfig?: CoreUserSupportConfig;
     exceededAttemptsHTML?: SafeHtml | string | null;
     siteConfig?: CoreSitePublicConfigResponse;
     redirectData?: CoreRedirectPayload;
+    showLoginForm = true;
 
     protected viewLeft = false;
     protected eventThrown = false;
     protected loginSuccessful = false;
     protected username = '';
+    protected alwaysShowLoginFormObserver?: CoreEventObserver;
+    protected loginObserver?: CoreEventObserver;
 
     constructor(
         protected fb: FormBuilder,
@@ -74,6 +104,11 @@ export class CoreLoginReconnectPage implements OnInit, OnDestroy {
         this.isLoggedOut = !currentSite || currentSite.isLoggedOut();
         this.credForm = fb.group({
             password: ['', Validators.required],
+        });
+
+        // Listen to LOGIN event to determine if login was successful, since the login can be done using QR, biometric, etc.
+        this.loginObserver = CoreEvents.on(CoreEvents.LOGIN, () => {
+            this.loginSuccessful = true;
         });
     }
 
@@ -94,39 +129,42 @@ export class CoreLoginReconnectPage implements OnInit, OnDestroy {
                 };
             }
 
-            const site = await CoreSites.getSite(this.siteId);
+            this.site = await CoreSites.getSite(this.siteId);
 
-            if (!site.infos) {
+            if (!this.site.infos) {
                 throw new CoreError('Invalid site');
             }
 
-            this.siteUrl = site.getURL();
-
             this.siteInfo = {
                 id: this.siteId,
-                siteUrl: this.siteUrl,
-                siteUrlWithoutProtocol: this.siteUrl.replace(/^https?:\/\//, '').toLowerCase(),
-                fullname: site.infos.fullname,
-                firstname: site.infos.firstname,
-                lastname: site.infos.lastname,
-                siteName: await site.getSiteName(),
-                userpictureurl: site.infos.userpictureurl,
+                siteUrl: this.site.getURL(),
+                siteUrlWithoutProtocol: this.site.getURL().replace(/^https?:\/\//, '').toLowerCase(),
+                fullname: this.site.infos.fullname,
+                firstname: this.site.infos.firstname,
+                lastname: this.site.infos.lastname,
+                siteName: await this.site.getSiteName(),
+                userpictureurl: this.site.infos.userpictureurl,
                 loggedOut: true, // Not used.
             };
 
-            this.username = site.infos.username;
-            this.supportConfig = new CoreUserAuthenticatedSupportConfig(site);
+            this.displaySiteUrl = this.site.shouldDisplayInformativeLinks();
+            this.username = this.site.infos.username;
+            this.supportConfig = new CoreUserAuthenticatedSupportConfig(this.site);
 
             const availableSites = await CoreLoginHelper.getAvailableSites();
 
             // Show logo instead of avatar if it's a fixed site.
             this.showUserAvatar = !availableSites.length;
 
-            await this.checkSiteConfig(site);
+            await this.checkSiteConfig();
+
+            this.alwaysShowLoginFormObserver = CoreEvents.on(ALWAYS_SHOW_LOGIN_FORM_CHANGED, async () => {
+                this.showLoginForm = await CoreLoginHelper.shouldShowLoginForm(this.siteConfig);
+            });
 
             this.showLoading = false;
         } catch (error) {
-            CoreDomUtils.showErrorModal(error);
+            CoreAlerts.showError(error);
 
             return this.cancel();
         }
@@ -142,9 +180,12 @@ export class CoreLoginReconnectPage implements OnInit, OnDestroy {
             {
                 config: this.siteConfig,
                 loginSuccessful: this.loginSuccessful,
+                siteId: this.siteId,
             },
             this.siteId,
         );
+        this.alwaysShowLoginFormObserver?.off();
+        this.loginObserver?.off();
     }
 
     /**
@@ -161,16 +202,18 @@ export class CoreLoginReconnectPage implements OnInit, OnDestroy {
     /**
      * Get some data (like identity providers) from the site config.
      */
-    protected async checkSiteConfig(site: CoreSite): Promise<void> {
-        this.siteConfig = await CoreUtils.ignoreErrors(site.getPublicConfig({
+    protected async checkSiteConfig(): Promise<void> {
+        this.siteConfig = await CorePromiseUtils.ignoreErrors(this.site.getPublicConfig({
             readingStrategy: CoreSitesReadingStrategy.PREFER_NETWORK,
         }));
+
+        this.showLoginForm = await CoreLoginHelper.shouldShowLoginForm(this.siteConfig);
 
         if (!this.siteConfig) {
             return;
         }
 
-        this.showForgottenPassword = !CoreLoginHelper.isForgottenPasswordDisabled(this.siteConfig);
+        this.showForgottenPassword = !this.site.isFeatureDisabled(FORGOTTEN_PASSWORD_FEATURE_NAME);
         this.exceededAttemptsHTML = CoreLoginHelper.buildExceededAttemptsHTML(
             !!this.supportConfig?.canContactSupport(),
             this.showForgottenPassword,
@@ -178,14 +221,12 @@ export class CoreLoginReconnectPage implements OnInit, OnDestroy {
 
         if (!this.eventThrown && !this.viewLeft) {
             this.eventThrown = true;
-            CoreEvents.trigger(CoreEvents.LOGIN_SITE_CHECKED, { config: this.siteConfig });
+            CoreEvents.trigger(CoreEvents.LOGIN_SITE_CHECKED, { config: this.siteConfig, siteId: this.siteId });
         }
 
         this.isBrowserSSO = CoreLoginHelper.isSSOLoginNeeded(this.siteConfig.typeoflogin);
 
         await CoreSites.checkApplication(this.siteConfig);
-
-        this.logoUrl = CoreLoginHelper.getLogoUrl(this.siteConfig);
     }
 
     /**
@@ -216,54 +257,57 @@ export class CoreLoginReconnectPage implements OnInit, OnDestroy {
         e.preventDefault();
         e.stopPropagation();
 
-        CoreApp.closeKeyboard();
+        CoreKeyboard.close();
 
         // Get input data.
         const password = this.credForm.value.password;
 
         if (!password) {
-            CoreDomUtils.showErrorModal('core.login.passwordrequired', true);
+            CoreAlerts.showError(Translate.instant('core.login.passwordrequired'));
 
             return;
         }
 
         if (!CoreNetwork.isOnline()) {
-            CoreDomUtils.showErrorModal('core.networkerrormsg', true);
+            CoreAlerts.showError(Translate.instant('core.networkerrormsg'));
 
             return;
         }
 
-        const modal = await CoreDomUtils.showModalLoading();
+        const modal = await CoreLoadings.show();
+
+        const url = this.site.getURL();
 
         try {
             // Start the authentication process.
-            const data = await CoreSites.getUserToken(this.siteUrl, this.username, password);
+            const data = await CoreSites.getUserToken(url, this.username, password);
 
-            await CoreSites.updateSiteToken(this.siteUrl, this.username, data.token, data.privateToken);
+            await CoreSites.updateSiteToken(url, this.username, data.token, data.privateToken);
 
             CoreForms.triggerFormSubmittedEvent(this.formElement, true);
 
+            // Unset oAuthID if it's set.
+            await CoreSites.removeSiteOauthId(this.siteId);
+
             // Update site info too.
-            await CoreSites.updateSiteInfoByUrl(this.siteUrl, this.username);
+            await CoreSites.updateSiteInfoByUrl(url, this.username);
 
             // Reset fields so the data is not in the view anymore.
             this.credForm.controls['password'].reset();
 
             // Go to the site initial page.
-            this.loginSuccessful = true;
-
             await CoreNavigator.navigateToSiteHome({
                 params: this.redirectData,
             });
         } catch (error) {
-            CoreLoginHelper.treatUserTokenError(this.siteUrl, error, this.username, password);
+            CoreLoginHelper.treatUserTokenError(url, error, this.username, password);
 
             if (error.loggedout) {
                 this.cancel();
-            } else if (error.errorcode == 'forcepasswordchangenotice') {
+            } else if (error.errorcode === 'forcepasswordchangenotice') {
                 // Reset password field.
                 this.credForm.controls.password.reset();
-            } else if (error.errorcode == 'invalidlogin') {
+            } else if (error.errorcode === 'invalidlogin') {
                 this.reconnectAttempts++;
             }
         } finally {
@@ -290,7 +334,7 @@ export class CoreLoginReconnectPage implements OnInit, OnDestroy {
      * Forgotten password button clicked.
      */
     forgottenPassword(): void {
-        CoreLoginHelper.forgottenPasswordClicked(this.siteUrl, this.username, this.siteConfig);
+        CoreLoginHelper.forgottenPasswordClicked(this.site.getURL(), this.username, this.siteConfig);
     }
 
     /**
@@ -302,7 +346,7 @@ export class CoreLoginReconnectPage implements OnInit, OnDestroy {
         }
 
         CoreLoginHelper.openBrowserForSSOLogin(
-            this.siteUrl,
+            this.site.getURL(),
             this.siteConfig.typeoflogin,
             undefined,
             this.siteConfig.launchurl,

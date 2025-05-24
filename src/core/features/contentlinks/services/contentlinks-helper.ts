@@ -14,14 +14,13 @@
 
 import { Injectable } from '@angular/core';
 import { CoreSites } from '@services/sites';
-import { CoreDomUtils } from '@services/utils/dom';
 import { CoreContentLinksDelegate, CoreContentLinksAction } from './contentlinks-delegate';
-import { CoreSite } from '@classes/site';
+import { CoreSite } from '@classes/sites/site';
 import { makeSingleton, Translate } from '@singletons';
 import { CoreNavigator } from '@services/navigator';
-import { Params } from '@angular/router';
-import { CoreContentLinksChooseSiteModalComponent } from '../components/choose-site-modal/choose-site-modal';
 import { CoreCustomURLSchemes } from '@services/urlschemes';
+import { CoreModals } from '@services/overlays/modals';
+import { CoreAlerts } from '@services/overlays/alerts';
 
 /**
  * Service that provides some features regarding content links.
@@ -49,7 +48,7 @@ export class CoreContentLinksHelperProvider {
                 }
             }
 
-            const action = await this.getFirstValidActionFor(url, undefined, username);
+            const action = await this.getFirstValidActionFor(url, courseId, username);
 
             return !!action;
         } catch {
@@ -91,28 +90,16 @@ export class CoreContentLinksHelperProvider {
     }
 
     /**
-     * Goes to a certain page in a certain site. If the site is current site it will perform a regular navigation,
-     * otherwise it will 'redirect' to the other site.
-     *
-     * @param navCtrlUnused Deprecated param.
-     * @param pageName Name of the page to go.
-     * @param pageParams Params to send to the page.
-     * @param siteId Site ID. If not defined, current site.
-     * @returns Promise resolved when done.
-     * @deprecated since 3.9.5. Use CoreNavigator.navigateToSitePath instead.
-     */
-    async goInSite(navCtrlUnused: unknown, pageName: string, pageParams: Params, siteId?: string): Promise<void> {
-        await CoreNavigator.navigateToSitePath(pageName, { params: pageParams, siteId });
-    }
-
-    /**
      * Go to the page to choose a site.
      *
      * @param url URL to treat.
      * @todo set correct root.
      */
     async goToChooseSite(url: string): Promise<void> {
-        await CoreDomUtils.openModal({
+        const { CoreContentLinksChooseSiteModalComponent }
+            = await import('@features/contentlinks/components/choose-site-modal/choose-site-modal');
+
+        await CoreModals.openModal({
             component: CoreContentLinksChooseSiteModalComponent,
             componentProps: {
                 url: url,
@@ -149,7 +136,7 @@ export class CoreContentLinksHelperProvider {
 
                 if (data.site) {
                     // URL is the root of the site.
-                    this.handleRootURL(data.site, openBrowserRoot);
+                    await this.handleRootURL(data.site, openBrowserRoot);
 
                     return true;
                 }
@@ -160,22 +147,23 @@ export class CoreContentLinksHelperProvider {
             if (!action) {
                 return false;
             }
+
             if (!CoreSites.isLoggedIn()) {
                 // No current site. Perform the action if only 1 site found, choose the site otherwise.
                 if (action.sites?.length == 1) {
-                    action.action(action.sites[0]);
+                    await action.action(action.sites[0]);
                 } else {
                     this.goToChooseSite(url);
                 }
-            } else if (action.sites?.length == 1 && action.sites[0] == CoreSites.getCurrentSiteId()) {
+            } else if (action.sites?.length === 1 && action.sites[0] === CoreSites.getCurrentSiteId()) {
                 // Current site.
-                action.action(action.sites[0]);
+                await action.action(action.sites[0]);
             } else {
                 try {
                     // Not current site or more than one site. Ask for confirmation.
-                    await CoreDomUtils.showConfirm(Translate.instant('core.contentlinks.confirmurlothersite'));
-                    if (action.sites?.length == 1) {
-                        action.action(action.sites[0]);
+                    await CoreAlerts.confirm(Translate.instant('core.contentlinks.confirmurlothersite'));
+                    if (action.sites?.length === 1) {
+                        await action.action(action.sites[0]);
                     } else {
                         this.goToChooseSite(url);
                     }
@@ -199,20 +187,54 @@ export class CoreContentLinksHelperProvider {
      * @param openBrowserRoot Whether to open in browser if it's root URL and it belongs to current site.
      * @param checkToken Whether to check that token is the same to verify it's current site. If false or not defined,
      *                   only the URL will be checked.
-     * @returns Promise resolved when done.
      */
     async handleRootURL(site: CoreSite, openBrowserRoot?: boolean, checkToken?: boolean): Promise<void> {
         const currentSite = CoreSites.getCurrentSite();
 
-        if (currentSite && currentSite.getURL() == site.getURL() && (!checkToken || currentSite.getToken() == site.getToken())) {
+        if (currentSite && currentSite.getURL() === site.getURL() && (!checkToken || currentSite.getToken() === site.getToken())) {
             // Already logged in.
             if (openBrowserRoot) {
-                return site.openInBrowserWithAutoLogin(site.getURL());
+                await site.openInBrowserWithAutoLogin(site.getURL());
             }
-        } else {
-            // Login in the site.
-            await CoreNavigator.navigateToSiteHome({ siteId: site.getId() });
+
+            return;
         }
+
+        // Login in the site.
+        await CoreNavigator.navigateToSiteHome({ siteId: site.getId() });
+    }
+
+    /**
+     * Visit a site link.
+     *
+     * @param url URL to handle.
+     * @param options Behaviour options.
+     * @param options.siteId Site Id.
+     * @param options.username Username related with the URL. E.g. in 'http://myuser@m.com', url would be 'http://m.com' and
+     *                 the username 'myuser'. Don't use it if you don't want to filter by username.
+     * @param options.checkRoot Whether to check if the URL is the root URL of a site.
+     * @param options.openBrowserRoot Whether to open in browser if it's root URL and it belongs to current site.
+     */
+    async visitLink(
+        url: string,
+        options: {
+            siteId?: string;
+            username?: string;
+            checkRoot?: boolean;
+            openBrowserRoot?: boolean;
+        } = {},
+    ): Promise<void> {
+        const treated = await this.handleLink(url, options.username, options.checkRoot, options.openBrowserRoot);
+
+        if (treated) {
+            return;
+        }
+
+        const site = options.siteId
+            ? await CoreSites.getSite(options.siteId)
+            : CoreSites.getCurrentSite();
+
+        await site?.openInBrowserWithAutoLogin(url);
     }
 
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { CoreAppSchema } from '@services/app';
+import { CoreAppSchema } from '@services/app-db';
 import { CoreSiteSchema } from '@services/sites';
 import { SQLiteDB, SQLiteDBTableSchema } from '@classes/sqlitedb';
 
@@ -28,6 +28,7 @@ export const SCHEMA_VERSIONS_TABLE_NAME = 'schema_versions';
 export const WS_CACHE_TABLE = 'wscache_2';
 export const CONFIG_TABLE = 'core_site_config';
 export const LAST_VIEWED_TABLE = 'core_site_last_viewed';
+export const LAST_VIEWED_PRIMARY_KEYS = ['component', 'id'] as const;
 
 // Schema to register in App DB.
 export const APP_SCHEMA: CoreAppSchema = {
@@ -156,7 +157,7 @@ export const SITE_SCHEMA: CoreSiteSchema = {
                     type: 'INTEGER',
                 },
             ],
-            primaryKeys: ['component', 'id'],
+            primaryKeys: [...LAST_VIEWED_PRIMARY_KEYS],
         },
     ],
 };
@@ -214,3 +215,5 @@ export type CoreSiteLastViewedDBRecord = {
     timeaccess: number;
     data?: string;
 };
+
+export type CoreSiteLastViewedDBPrimaryKeys = typeof LAST_VIEWED_PRIMARY_KEYS[number];

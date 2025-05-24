@@ -1,13 +1,9 @@
-@import "~theme/globals";
+@use "theme/globals" as *;
 
 :host {
 
     .addon-forum-star {
         color: var(--core-star-color);
-    }
-
-    .core-discussionusername {
-        font-size: 1.2em;
     }
 
     .core-groupname {
@@ -74,4 +70,10 @@
         border-top: 1px solid var(--spacer-color);
     }
 
+    .ripple-parent {
+        position: relative;
+        ion-ripple-effect {
+            z-index: 1;
+        }
+    }
 }

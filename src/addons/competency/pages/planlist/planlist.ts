@@ -13,8 +13,6 @@
 // limitations under the License.
 
 import { AfterViewInit, Component, OnDestroy, ViewChild } from '@angular/core';
-import { IonRefresher } from '@ionic/angular';
-import { CoreDomUtils } from '@services/utils/dom';
 import { CoreSplitViewComponent } from '@components/split-view/split-view';
 import { CoreNavigator } from '@services/navigator';
 import { AddonCompetencyPlanFormatted, AddonCompetencyPlansSource } from '@addons/competency/classes/competency-plans-source';
@@ -24,6 +22,8 @@ import { CoreTime } from '@singletons/time';
 import { CoreAnalytics, CoreAnalyticsEventType } from '@services/analytics';
 import { CoreSites } from '@services/sites';
 import { Translate } from '@singletons';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { CoreSharedModule } from '@/core/shared.module';
 
 /**
  * Page that displays the list of learning plans.
@@ -31,8 +31,12 @@ import { Translate } from '@singletons';
 @Component({
     selector: 'page-addon-competency-planlist',
     templateUrl: 'planlist.html',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+    ],
 })
-export class AddonCompetencyPlanListPage implements AfterViewInit, OnDestroy {
+export default class AddonCompetencyPlanListPage implements AfterViewInit, OnDestroy {
 
     @ViewChild(CoreSplitViewComponent) splitView!: CoreSplitViewComponent;
 
@@ -77,7 +81,7 @@ export class AddonCompetencyPlanListPage implements AfterViewInit, OnDestroy {
 
             this.logView();
         } catch (error) {
-            CoreDomUtils.showErrorModalDefault(error, 'Error getting learning plans data.');
+            CoreAlerts.showError(error, { default: 'Error getting learning plans data.' });
         }
     }
 
@@ -86,7 +90,7 @@ export class AddonCompetencyPlanListPage implements AfterViewInit, OnDestroy {
      *
      * @param refresher Refresher.
      */
-    async refreshLearningPlans(refresher: IonRefresher): Promise<void> {
+    async refreshLearningPlans(refresher: HTMLIonRefresherElement): Promise<void> {
         await this.plans.getSource().invalidateCache();
 
         this.plans.getSource().setDirty(true);

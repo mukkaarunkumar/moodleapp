@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { CoreApp } from '@services/app';
+import { CoreRedirects } from '@singletons/redirects';
 import { CoreUpdateManager } from '@services/update-manager';
 
+/**
+ * Read redirect data from local storage and clear it if it existed.
+ */
 export default async function(): Promise<void> {
     await CoreUpdateManager.donePromise;
 
-    CoreApp.consumeStorageRedirect();
+    CoreRedirects.consumeStorageRedirect();
 }

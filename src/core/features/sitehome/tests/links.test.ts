@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { mock, mockSingleton } from '@/testing/utils';
-import { CoreSite } from '@classes/site';
+import { CoreSite } from '@classes/sites/site';
 import { CoreContentLinksDelegate } from '@features/contentlinks/services/contentlinks-delegate';
 import { CoreLoginHelper } from '@features/login/services/login-helper';
 import { CoreSiteHomeIndexLinkHandlerService } from '@features/sitehome/services/handlers/index-link';
@@ -30,8 +30,10 @@ describe('Site Home link handlers', () => {
 
         mockSingleton(CoreSites, mock({
             isStoredRootURL: () => Promise.resolve({ siteIds: [siteId] }),
-            getSite: () => Promise.resolve(new CoreSite(siteId, siteUrl)),
+            getSite: () => Promise.resolve(new CoreSite(siteId, siteUrl, '')),
             getSiteIdsFromUrl: () => Promise.resolve([siteId]),
+            getCurrentSiteId: () => siteId,
+            isLoggedIn: () => true,
         }));
 
         mockSingleton(CoreLoginHelper, { getAvailableSites: async () => [{ url: siteUrl, name: 'Example Campus' }] });

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { Injectable } from '@angular/core';
-import { InAppBrowser, InAppBrowserObject } from '@ionic-native/in-app-browser/ngx';
+import { InAppBrowser, InAppBrowserObject } from '@awesome-cordova-plugins/in-app-browser/ngx';
 
 /**
  * Emulates the Cordova InAppBrowser plugin in desktop apps.
@@ -32,7 +32,7 @@ export class InAppBrowserMock extends InAppBrowser {
     create(url: string, target?: string, options: string = 'location=yes'): InAppBrowserObject {
         if (options && typeof options !== 'string') {
             // Convert to string.
-            options = Object.keys(options).map((key) => key + '=' + options[key]).join(',');
+            options = Object.keys(options).map((key) => `${key}=${options[key]}`).join(',');
         }
 
         return super.create(url, target, options);

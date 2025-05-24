@@ -1,6 +1,11 @@
-<ion-slides *ngIf="loaded" (ionSlideWillChange)="slideWillChange()" (ionSlideDidChange)="slideDidChange()" [options]="options">
-    <ion-slide *ngFor="let item of items; index as index" [attr.aria-hidden]="!isActive(index)">
-        <ng-container *ngIf="template" [ngTemplateOutlet]="template" [ngTemplateOutletContext]="{item: item, active: isActive(index)}">
-        </ng-container>
-    </ion-slide>
-</ion-slides>
+@if (loaded) {
+    <swiper-container #swiperRef [attr.aria-busy]="activeSlideIndex ? 'true' : null">
+        @for (item of items; track manager?.getSource().getItemId(item); let index = $index) {
+            <swiper-slide [attr.aria-hidden]="!isActive(index)" [attr.tabindex]="!isActive(index) ? -1 : null">
+                @if (template) {
+                    <ng-container [ngTemplateOutlet]="template" [ngTemplateOutletContext]="{item: item, active: isActive(index)}" />
+                }
+            </swiper-slide>
+        }
+    </swiper-container>
+}

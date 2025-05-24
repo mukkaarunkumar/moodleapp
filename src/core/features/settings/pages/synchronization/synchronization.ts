@@ -17,7 +17,6 @@ import { Component, OnDestroy, OnInit } from '@angular/core';
 import { CoreConstants } from '@/core/constants';
 import { CoreEventObserver, CoreEvents } from '@singletons/events';
 import { CoreSites } from '@services/sites';
-import { CoreDomUtils } from '@services/utils/dom';
 import { CoreConfig } from '@services/config';
 import { CoreSettingsHelper } from '@features/settings/services/settings-helper';
 import { NgZone, Translate } from '@singletons';
@@ -25,6 +24,9 @@ import { CoreAccountsList, CoreLoginHelper } from '@features/login/services/logi
 import { CoreNetwork } from '@services/network';
 import { Subscription } from 'rxjs';
 import { CoreNavigator } from '@services/navigator';
+import { CoreToasts } from '@services/overlays/toasts';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { CoreSharedModule } from '@/core/shared.module';
 
 /**
  * Page that displays the synchronization settings.
@@ -32,9 +34,12 @@ import { CoreNavigator } from '@services/navigator';
 @Component({
     selector: 'page-core-app-settings-synchronization',
     templateUrl: 'synchronization.html',
-    styleUrls: ['../../../login/sitelist.scss'],
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+    ],
 })
-export class CoreSettingsSynchronizationPage implements OnInit, OnDestroy {
+export default class CoreSettingsSynchronizationPage implements OnInit, OnDestroy {
 
     accountsList: CoreAccountsList = {
         sameSite: [],
@@ -105,10 +110,8 @@ export class CoreSettingsSynchronizationPage implements OnInit, OnDestroy {
      * @inheritdoc
      */
     async ngOnInit(): Promise<void> {
-        const currentSiteId = CoreSites.getCurrentSiteId();
-
         try {
-            this.accountsList = await CoreLoginHelper.getAccountsList(currentSiteId);
+            this.accountsList = await CoreLoginHelper.getAccountsList();
         } catch {
             // Ignore errors.
         }
@@ -134,12 +137,17 @@ export class CoreSettingsSynchronizationPage implements OnInit, OnDestroy {
         // Using syncOnlyOnWifi false to force manual sync.
         try {
             await CoreSettingsHelper.synchronizeSite(false, siteId);
+
+            CoreToasts.show({
+                message: 'core.settings.sitesynccompleted',
+                translateMessage: true,
+            });
         } catch (error) {
             if (this.isDestroyed) {
                 return;
             }
 
-            CoreDomUtils.showErrorModalDefault(error, 'core.settings.sitesyncfailed', true);
+            CoreAlerts.showError(error, { default: Translate.instant('core.settings.sitesyncfailed') });
         }
     }
 
@@ -167,10 +175,10 @@ export class CoreSettingsSynchronizationPage implements OnInit, OnDestroy {
      * Show information about sync actions.
      */
     showInfo(): void {
-        CoreDomUtils.showAlert(
-            Translate.instant('core.help'),
-            Translate.instant('core.settings.synchronizenowhelp'),
-        );
+        CoreAlerts.show({
+            header: Translate.instant('core.help'),
+            message: Translate.instant('core.settings.synchronizenowhelp'),
+        });
     }
 
     /**

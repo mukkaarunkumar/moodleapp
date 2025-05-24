@@ -13,11 +13,9 @@
 // limitations under the License.
 
 import { Component, OnDestroy, OnInit } from '@angular/core';
-import { CoreDomUtils } from '@services/utils/dom';
 import { AddonCompetencyDataForPlanPageCompetency, AddonCompetencyDataForPlanPageWSResponse } from '../../services/competency';
 import { CoreNavigator } from '@services/navigator';
 import { CoreUserProfile } from '@features/user/services/user';
-import { IonRefresher } from '@ionic/angular';
 import { CoreSwipeNavigationItemsManager } from '@classes/items-management/swipe-navigation-items-manager';
 import { CoreRoutedItemsManagerSourcesTracker } from '@classes/items-management/routed-items-manager-sources-tracker';
 import { AddonCompetencyPlansSource } from '@addons/competency/classes/competency-plans-source';
@@ -25,6 +23,8 @@ import { CoreListItemsManager } from '@classes/items-management/list-items-manag
 import { AddonCompetencyPlanCompetenciesSource } from '@addons/competency/classes/competency-plan-competencies-source';
 import { CoreAnalytics, CoreAnalyticsEventType } from '@services/analytics';
 import { CoreTime } from '@singletons/time';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { CoreSharedModule } from '@/core/shared.module';
 
 /**
  * Page that displays a learning plan.
@@ -32,8 +32,12 @@ import { CoreTime } from '@singletons/time';
 @Component({
     selector: 'page-addon-competency-plan',
     templateUrl: 'plan.html',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+    ],
 })
-export class AddonCompetencyPlanPage implements OnInit, OnDestroy {
+export default class AddonCompetencyPlanPage implements OnInit, OnDestroy {
 
     plans!: CoreSwipeNavigationItemsManager;
     competencies!: CoreListItemsManager<AddonCompetencyDataForPlanPageCompetency, AddonCompetencyPlanCompetenciesSource>;
@@ -58,8 +62,7 @@ export class AddonCompetencyPlanPage implements OnInit, OnDestroy {
             this.competencies = new CoreListItemsManager(competenciesSource, AddonCompetencyPlanPage);
             this.plans = new CoreSwipeNavigationItemsManager(plansSource);
         } catch (error) {
-            CoreDomUtils.showErrorModal(error);
-
+            CoreAlerts.showError(error);
             CoreNavigator.back();
 
             return;
@@ -102,7 +105,7 @@ export class AddonCompetencyPlanPage implements OnInit, OnDestroy {
 
             this.logView();
         } catch (error) {
-            CoreDomUtils.showErrorModalDefault(error, 'Error getting learning plan data.');
+            CoreAlerts.showError(error, { default: 'Error getting learning plan data.' });
         }
     }
 
@@ -111,7 +114,7 @@ export class AddonCompetencyPlanPage implements OnInit, OnDestroy {
      *
      * @param refresher Refresher.
      */
-    async refreshLearningPlan(refresher: IonRefresher): Promise<void> {
+    async refreshLearningPlan(refresher: HTMLIonRefresherElement): Promise<void> {
         await this.competencies.getSource().invalidateCache();
 
         this.fetchLearningPlan().finally(() => {

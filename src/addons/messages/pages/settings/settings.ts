@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { Component, OnDestroy, OnInit } from '@angular/core';
+import { Component, OnDestroy, OnInit, signal } from '@angular/core';
 import {
-    AddonMessagesProvider, AddonMessagesMessagePreferences,
+    AddonMessagesMessagePreferences,
     AddonMessagesMessagePreferencesNotification,
     AddonMessagesMessagePreferencesNotificationProcessor,
     AddonMessages,
@@ -23,11 +23,14 @@ import { CoreUser } from '@features/user/services/user';
 import { CoreConfig } from '@services/config';
 import { CoreEvents } from '@singletons/events';
 import { CoreSites } from '@services/sites';
-import { CoreDomUtils } from '@services/utils/dom';
 import { CoreConstants } from '@/core/constants';
-import { IonRefresher } from '@ionic/angular';
 import { AddonNotificationsPreferencesNotificationProcessorState } from '@addons/notifications/services/notifications';
 import { CorePlatform } from '@services/platform';
+import { CoreErrorHelper } from '@services/error-helper';
+import { CoreLoadings } from '@services/overlays/loadings';
+import { ADDON_MESSAGES_NOTIFICATION_PREFERENCES_KEY, AddonMessagesMessagePrivacy } from '@addons/messages/constants';
+import { CoreAlerts } from '@services/overlays/alerts';
+import { CoreSharedModule } from '@/core/shared.module';
 
 /**
  * Page that displays the messages settings page.
@@ -35,8 +38,12 @@ import { CorePlatform } from '@services/platform';
 @Component({
     selector: 'page-addon-messages-settings',
     templateUrl: 'settings.html',
+    standalone: true,
+    imports: [
+        CoreSharedModule,
+    ],
 })
-export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
+export default class AddonMessagesSettingsPage implements OnInit, OnDestroy {
 
     protected updateTimeout?: number;
 
@@ -45,11 +52,12 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
     contactablePrivacy?: number | boolean;
     advancedContactable = false; // Whether the site supports "advanced" contactable privacy.
     allowSiteMessaging = false;
-    onlyContactsValue = AddonMessagesProvider.MESSAGE_PRIVACY_ONLYCONTACTS;
-    courseMemberValue = AddonMessagesProvider.MESSAGE_PRIVACY_COURSEMEMBER;
-    siteValue = AddonMessagesProvider.MESSAGE_PRIVACY_SITE;
+    onlyContactsValue = AddonMessagesMessagePrivacy.ONLYCONTACTS;
+    courseMemberValue = AddonMessagesMessagePrivacy.COURSEMEMBER;
+    siteValue = AddonMessagesMessagePrivacy.SITE;
     groupMessagingEnabled = false;
     sendOnEnter = false;
+    warningMessage = signal<string | undefined>(undefined);
 
     protected loggedInOffLegacyMode = false;
     protected previousContactableValue?: number | boolean;
@@ -89,7 +97,7 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
                 for (const component of preferences.components) {
                     // Only display get the notification preferences.
                     component.notifications = component.notifications.filter((notification) =>
-                        notification.preferencekey == AddonMessagesProvider.NOTIFICATION_PREFERENCES_KEY);
+                        notification.preferencekey === ADDON_MESSAGES_NOTIFICATION_PREFERENCES_KEY);
 
                     if (this.loggedInOffLegacyMode) {
                         // Load enabled from loggedin / loggedoff values.
@@ -107,8 +115,15 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
             this.preferences = preferences;
             this.contactablePrivacy = preferences.blocknoncontacts;
             this.previousContactableValue = this.contactablePrivacy;
+            this.warningMessage.set(undefined);
         } catch (error) {
-            CoreDomUtils.showErrorModal(error);
+            if (error.errorcode === 'nopermissions') {
+                this.warningMessage.set(CoreErrorHelper.getErrorMessageFromError(error));
+
+                return;
+            }
+
+            CoreAlerts.showError(error);
         } finally {
             this.preferencesLoaded = true;
         }
@@ -147,7 +162,7 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
             return;
         }
 
-        const modal = await CoreDomUtils.showModalLoading('core.sending', true);
+        const modal = await CoreLoadings.show('core.sending', true);
 
         if (!this.advancedContactable) {
             // Convert from boolean to number.
@@ -161,7 +176,7 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
             this.previousContactableValue = this.contactablePrivacy;
         } catch (message) {
             // Show error and revert change.
-            CoreDomUtils.showErrorModal(message);
+            CoreAlerts.showError(message);
             this.contactablePrivacy = this.previousContactableValue;
         } finally {
             modal.dismiss();
@@ -192,10 +207,10 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
 
         const promises: Promise<void>[] = [];
         if (this.loggedInOffLegacyMode) {
-            promises.push(CoreUser.updateUserPreference(notification.preferencekey + '_loggedin', value));
-            promises.push(CoreUser.updateUserPreference(notification.preferencekey + '_loggedoff', value));
+            promises.push(CoreUser.updateUserPreference(`${notification.preferencekey}_loggedin`, value));
+            promises.push(CoreUser.updateUserPreference(`${notification.preferencekey}_loggedoff`, value));
         }  else {
-            promises.push(CoreUser.updateUserPreference(notification.preferencekey + '_enabled', value));
+            promises.push(CoreUser.updateUserPreference(`${notification.preferencekey}_enabled`, value));
         }
 
         try {
@@ -204,7 +219,7 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
             this.updatePreferencesAfterDelay();
         } catch (error) {
             // Show error and revert change.
-            CoreDomUtils.showErrorModal(error);
+            CoreAlerts.showError(error);
             processor.enabled = !processor.enabled;
         } finally {
             notification.updating = false;
@@ -225,24 +240,24 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
     ): Promise<void> {
         // Update only the specified state.
         const processorState: AddonNotificationsPreferencesNotificationProcessorState = processor[state];
-        const preferenceName = notification.preferencekey + '_' + processorState.name;
+        const preferenceName = `${notification.preferencekey}_${processorState.name}`;
 
         const value = notification.processors
             .filter((processor) => processor[state].checked)
             .map((processor) => processor.name)
             .join(',');
 
-        notification['updating'+state] = true;
+        notification[`updating${state}`] = true;
         try {
             await CoreUser.updateUserPreference(preferenceName, value);
             // Update the preferences since they were modified.
             this.updatePreferencesAfterDelay();
         } catch (error) {
             // Show error and revert change.
-            CoreDomUtils.showErrorModal(error);
+            CoreAlerts.showError(error);
             processorState.checked = !processorState.checked;
         } finally {
-            notification['updating'+state] = false;
+            notification[`updating${state}`] = false;
         }
     }
 
@@ -251,7 +266,7 @@ export class AddonMessagesSettingsPage implements OnInit, OnDestroy {
      *
      * @param refresher Refresher.
      */
-    refreshPreferences(refresher?: IonRefresher): void {
+    refreshPreferences(refresher?: HTMLIonRefresherElement): void {
         AddonMessages.invalidateMessagePreferences().finally(() => {
             this.fetchPreferences().finally(() => {
                 refresher?.complete();

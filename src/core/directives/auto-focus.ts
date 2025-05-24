@@ -14,24 +14,25 @@
 
 import { Directive, Input, ElementRef, AfterViewInit } from '@angular/core';
 
-import { CoreDomUtils } from '@services/utils/dom';
-import { CoreUtils } from '@services/utils/utils';
 import { CoreDom } from '@singletons/dom';
+import { CoreWait } from '@singletons/wait';
+import { toBoolean } from '../transforms/boolean';
 
 /**
  * Directive to auto focus an element when a view is loaded.
  *
  * The value of the input will decide if show keyboard when focusing the element (only on Android).
- * In case value is nofocus, the directive is disabled.
+ * In case value is false, the directive is disabled.
  *
  * <ion-input [core-auto-focus]="showKeyboard">
  */
 @Directive({
     selector: '[core-auto-focus]',
+    standalone: true,
 })
 export class CoreAutoFocusDirective implements AfterViewInit {
 
-    @Input('core-auto-focus') autoFocus: boolean | string = true;
+    @Input({ alias: 'core-auto-focus', transform: toBoolean }) autoFocus = true;
 
     protected element: HTMLIonInputElement | HTMLIonTextareaElement | HTMLIonSearchbarElement | HTMLElement;
 
@@ -43,13 +44,17 @@ export class CoreAutoFocusDirective implements AfterViewInit {
      * @inheritdoc
      */
     async ngAfterViewInit(): Promise<void> {
-        if (CoreUtils.isFalseOrZero(this.autoFocus)) {
+        if (!this.autoFocus) {
             return;
         }
 
         await CoreDom.waitToBeInDOM(this.element);
 
-        CoreDomUtils.focusElement(this.element);
+        // Wait in case there is an animation to enter the page, otherwise the interaction
+        // between the keyboard appearing and the animation causes a visual glitch.
+        await CoreWait.wait(540);
+
+        CoreDom.focusElement(this.element);
 
     }
 

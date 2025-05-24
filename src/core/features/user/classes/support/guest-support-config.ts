@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { CoreSiteConfigSupportAvailability, CoreSitePublicConfigResponse } from '@classes/site';
-import { CoreLoginHelper } from '@features/login/services/login-helper';
+import {
+    CoreSiteConfigSupportAvailability,
+    CoreSitePublicConfigResponse,
+    CoreUnauthenticatedSite,
+} from '@classes/sites/unauthenticated-site';
 import { CoreUserNullSupportConfig } from '@features/user/classes/support/null-support-config';
 import { CoreSites } from '@services/sites';
-import { CoreUtils } from '@services/utils/utils';
+import { CorePromiseUtils } from '@singletons/promise-utils';
 import { CoreUserSupportConfig } from './support-config';
+import { CoreSitesFactory } from '@services/sites-factory';
 
 /**
  * Support config for a guest user.
@@ -31,20 +35,22 @@ export class CoreUserGuestSupportConfig extends CoreUserSupportConfig {
      * @returns Support config.
      */
     static async forSite(siteUrl: string): Promise<CoreUserSupportConfig> {
-        const siteConfig = await CoreUtils.ignoreErrors(CoreSites.getPublicSiteConfigByUrl(siteUrl));
+        const siteConfig = await CorePromiseUtils.ignoreErrors(CoreSites.getPublicSiteConfigByUrl(siteUrl));
 
         if (!siteConfig) {
             return new CoreUserNullSupportConfig();
         }
 
-        return new CoreUserGuestSupportConfig(siteConfig);
+        return new CoreUserGuestSupportConfig(CoreSitesFactory.makeUnauthenticatedSite(siteUrl, siteConfig), siteConfig);
     }
 
+    private site: CoreUnauthenticatedSite;
     private config: CoreSitePublicConfigResponse;
 
-    constructor(config: CoreSitePublicConfigResponse) {
+    constructor(site: CoreUnauthenticatedSite, config: CoreSitePublicConfigResponse) {
         super();
 
+        this.site = site;
         this.config = config;
     }
 
@@ -52,7 +58,7 @@ export class CoreUserGuestSupportConfig extends CoreUserSupportConfig {
      * @inheritdoc
      */
     canContactSupport(): boolean {
-        if (CoreLoginHelper.isFeatureDisabled('NoDelegate_CoreUserSupport', this.config)) {
+        if (this.site.isFeatureDisabled('NoDelegate_CoreUserSupport')) {
             return false;
         }
 
@@ -63,6 +69,15 @@ export class CoreUserGuestSupportConfig extends CoreUserSupportConfig {
 
         // This config is only available to guests since 4.0, if it's missing we can assume guests can't contact support.
         return 'supportpage' in this.config;
+    }
+
+    /**
+     * Get site.
+     *
+     * @returns site.
+     */
+    getSite(): CoreUnauthenticatedSite {
+        return this.site;
     }
 
     /**

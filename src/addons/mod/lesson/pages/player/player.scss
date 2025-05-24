@@ -2,8 +2,8 @@
    --background-odd: var(--light);
 }
 
-:host-context(html.dark) {
-   --background-odd: var(--medium);
+:host-context(:root.dark) {
+   --background-odd: var(--gray-800);
 }
 
 :host ::ng-deep {
@@ -26,7 +26,7 @@
         }
 
         tr:last-child td {
-            border-bottom: 0;
+            border-bottom: 0px;
         }
 
         td {

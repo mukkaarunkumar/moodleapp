@@ -30,9 +30,11 @@ import { AddonModLabelModule } from './label/label.module';
 import { AddonModLessonModule } from './lesson/lesson.module';
 import { AddonModLtiModule } from './lti/lti.module';
 import { AddonModPageModule } from './page/page.module';
+import { AddonModQbankModule } from './qbank/qbank.module';
 import { AddonModQuizModule } from './quiz/quiz.module';
 import { AddonModResourceModule } from './resource/resource.module';
 import { AddonModScormModule } from './scorm/scorm.module';
+import { AddonModSubsectionModule } from './subsection/subsection.module';
 import { AddonModSurveyModule } from './survey/survey.module';
 import { AddonModUrlModule } from './url/url.module';
 import { AddonModWikiModule } from './wiki/wiki.module';
@@ -56,9 +58,11 @@ import { AddonModWorkshopModule } from './workshop/workshop.module';
         AddonModLessonModule,
         AddonModLtiModule,
         AddonModPageModule,
+        AddonModQbankModule,
         AddonModQuizModule,
         AddonModResourceModule,
         AddonModScormModule,
+        AddonModSubsectionModule,
         AddonModSurveyModule,
         AddonModUrlModule,
         AddonModWikiModule,
